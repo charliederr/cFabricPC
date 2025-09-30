@@ -1,6 +1,14 @@
-torch
-torchvision
-tqdm
-plotly
-numpy
-hypothesis
+# Core dependencies for PC-Continual-Learning
+# For development dependencies, use: pip install -e ".[dev]"
+
+torch>=2.0.0
+torchvision>=0.15.0
+tqdm>=4.65.0
+plotly>=5.14.0
+numpy>=1.24.0
+hypothesis>=6.0.0
+
+# Optional: Install with specific extras
+# pip install -e ".[dev]"   # Development tools
+# pip install -e ".[jax]"   # JAX support (planned)
+# pip install -e ".[wandb]" # Weights & Biases logging
