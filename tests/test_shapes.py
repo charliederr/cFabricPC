@@ -1,9 +1,7 @@
 import pytest
 import torch
 
-from models.graph_net import PCGraphNet
-
-pytestmark = [pytest.mark.shapes]
+from fabricpc.models.graph_net import PCGraphNet
 
 
 def test_allocate_and_tensor_shapes(small_graph_config, device):

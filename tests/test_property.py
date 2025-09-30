@@ -2,9 +2,7 @@ import pytest
 import torch
 from hypothesis import given, strategies as st
 
-from models.graph_net import PCGraphNet
-
-pytestmark = [pytest.mark.property]
+from fabricpc.models.graph_net import PCGraphNet
 
 
 @given(

@@ -1,8 +1,6 @@
 import pytest
 
-from models.graph_net import PCGraphNet
-
-pytestmark = [pytest.mark.unit]
+from fabricpc.models.graph_net import PCGraphNet
 
 
 def test_duplicate_node_names_raise():

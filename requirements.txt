@@ -3,3 +3,4 @@ torchvision
 tqdm
 plotly
 numpy
+hypothesis

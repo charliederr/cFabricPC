@@ -1,9 +1,7 @@
 import pytest
 import torch
 
-from models.graph_net import PCGraphNet
-
-pytestmark = [pytest.mark.smoke]
+from fabricpc.models.graph_net import PCGraphNet
 
 
 def test_import_and_instantiate(small_graph_config):
