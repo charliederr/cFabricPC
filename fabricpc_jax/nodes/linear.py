@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from fabricpc_jax.nodes.base import NodeBase, SlotSpec
-from fabricpc_jax.core.types import NodeParams
+from fabricpc_jax.core.types import NodeParams, NodeState, NodeInfo, GraphStructure
 from fabricpc_jax.core.activations import get_activation
 from fabricpc_jax.core.initialization import initialize_weights
 
@@ -90,21 +90,21 @@ class LinearNode(NodeBase):
     @staticmethod
     def forward(
         params: NodeParams,
-        inputs: Dict[str, jnp.ndarray],
-        config: Dict[str, Any],
+        inputs: Dict[str, jnp.ndarray], # EdgeInfo.key -> input tensors
+        node_info: NodeInfo,
         node_out_shape: Tuple[int, ...],
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, Dict[str, jnp.ndarray]]:
         """
         Forward pass: linear transformation with activation.
 
         Args:
             params: Node parameters (weights, biases)
             inputs: Dictionary mapping edge keys to input tensors
-            config: Node configuration (contains activation function, etc.)
+            node_info: NodeInfo object (contains activation function, etc.)
             node_out_shape: shape of the node output (same as latent state)
 
         Returns:
-            Tuple of (z_mu, pre_activation)
+            Tuple of (z_mu, pre_activation, substructure_state):
         """
 
         pre_activation = jnp.zeros(node_out_shape)
@@ -118,46 +118,78 @@ class LinearNode(NodeBase):
             pre_activation = pre_activation + params.biases["b"]
 
         # Apply activation function
-        default_activ = {"type": "identity"}
-        activation_fn, _ = get_activation(config.get("activation", default_activ))
+        activation_fn, _ = get_activation(node_info.activation_config)
         z_mu = activation_fn(pre_activation)
 
-        return z_mu, pre_activation
+        return z_mu, pre_activation, {}
 
     @staticmethod
-    def compute_jacobian(
+    def compute_gradient(
         params: NodeParams,
-        inputs: Dict[str, jnp.ndarray],  # EdgeInfo.key -> inputs data
-        config: Dict[str, Any],
-        node_out_shape: Tuple[int, ...],
-    ) -> Dict[str, jnp.ndarray]:  # EdgeInfo.key -> Jacobian matrix
+        inputs: Dict[str, jnp.ndarray],
+        node_state: NodeState,
+        node_info: NodeInfo,
+        structure: GraphStructure,
+    ) -> Dict[str, jnp.ndarray]:
         """
-        Direct computation of Jacobian for linear nodes.
+        Compute local gradients of latent states for inference updates.
+        Compute the contributions of node itself and its source nodes to the energy of this node.
+        Use the energy functional specific in NodeInfo to compute the gradients.
 
-        For linear nodes, the Jacobian is simply the weight matrix slice.
+        Computes:
+        ∂E/∂z_i, where i is in {this node} ∪ {source nodes connected to this node}
 
         Args:
-            params: Node parameters
-            inputs: Dictionary mapping slot names to concatenated input tensors
-            config: Node configuration
-            node_out_shape: shape of the node output (same as latent state)
+            params: Current node parameters
+            inputs: Dictionary mapping edge key to input tensors
+            node_state: Current node state (contains errors, pre-activations, etc.)
+            node_info: Node configuration
 
         Returns:
-            dictionary of Jacobian matrix of shape (input_dim, output_dim) for each edge key
+            Dictionary mapping node names to latent gradient contributions
         """
-        jacobian_dict = {}
-        for edge_key in inputs.keys():
-            jacobian_dict[edge_key] = params.weights[edge_key].T  # shape after transpose (dim_node_latent, dim_input)
 
-        # TODO apply the activation derivative
-        return jacobian_dict
+        # Determine the energy functional to use for the node from its config
+        energy_functional = "gaussian"  # TODO make configurable per node, node_info.config.get("energy_functional", "gaussian")
+        preactivationLatent = node_info.node_config.get("latenty_type") == "preactivation"
+        latent_grads = {}
+
+        # Self energy gradient
+        latent_grads[node_info.name] = node_state.error
+
+        # Back-synapse gradients for each edge, and accumulate to source nodes
+        # ∂E/∂z_source = -W^T @ gain_mod_error_target
+        for edge_key, z in inputs.items():
+            source_name = structure.edges[edge_key].source
+            if source_name not in latent_grads:
+                latent_grads[source_name] = jnp.zeros_like(z)
+
+            if energy_functional == "gaussian":
+                if preactivationLatent:
+                    raise NotImplementedError("Pre-activation latent type not implemented for LinearNode with Gaussian energy.")
+                    grad_contribution = -jnp.matmul(node_state.error, params.weights[edge_key].T)
+                    # error (batch, dim_t)
+                    # weights{s->t} (dim_s, dim_t)
+                else:
+                    # For Gaussian energy, the gradient contribution is W @ gain_mod_error
+                    grad_contribution = -jnp.matmul(node_state.gain_mod_error, params.weights[edge_key].T)
+                    # gain_mod_error (batch, dim_t) = error * f'(a)
+                    # weights{s->t} (dim_s, dim_t)
+            else:
+                raise NotImplementedError(f"Energy functional '{energy_functional}' not implemented in LinearNode.")
+                # _, activation_deriv = get_activation(node_info.node_config.get("activation_config"))
+                # f_prime = activation_deriv(node_state.pre_activation)  # shape (batch_size, dim_node_latent)
+
+            latent_grads[source_name] = latent_grads[source_name] + grad_contribution
+
+        return latent_grads
 
     @staticmethod
     def compute_params_gradient(
         params: NodeParams,
         inputs: Dict[str, jnp.ndarray],
-        gain_mod_error: jnp.ndarray,
-        config: Dict[str, Any]
+        node_state: NodeState,  # state object for the present node
+        node_info: NodeInfo
     ) -> NodeParams:
         """
         Compute local gradients for weights and biases.
@@ -169,11 +201,11 @@ class LinearNode(NodeBase):
         Args:
             params: Current node parameters
             inputs: Dictionary with edge_key -> input tensor
-            gain_mod_error: Error weighted by activation derivative, just this node
-            config: Node configuration
+            node_state: state object for the present node
+            node_info: NodeInfo object
 
         Returns:
-            NodeParams containing gradients
+            NodeParams containing weight and bias gradients
         """
 
         # fix the test file line 203 to check for params keyed on edge strings
@@ -183,12 +215,12 @@ class LinearNode(NodeBase):
 
         # Weight gradient
         for edge_key, in_tensor in inputs.items():
-            grad_w = -jnp.matmul(in_tensor.T, gain_mod_error)
+            grad_w = -jnp.matmul(in_tensor.T, node_state.gain_mod_error)
             weight_grads[edge_key] = grad_w
 
         # Bias gradient
         if "b" in params.biases:
-            grad_b = -jnp.sum(gain_mod_error, axis=0, keepdims=True)
+            grad_b = -jnp.sum(node_state.gain_mod_error, axis=0, keepdims=True)
             bias_grads["b"] = grad_b
 
         return NodeParams(weights=weight_grads, biases=bias_grads)

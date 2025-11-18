@@ -34,7 +34,7 @@ def compute_local_weight_gradients(
         structure: Graph structure
 
     Returns:
-        GraphParams containing gradients for each node
+        GraphParams containing gradients for the parameters
     """
     gradients = {}
 
@@ -44,7 +44,7 @@ def compute_local_weight_gradients(
             gradients[node_name] = NodeParams(weights={}, biases={})
             continue
 
-        in_edges_data = gather_inputs(node_info, structure, final_state.z_latent)
+        in_edges_data = gather_inputs(node_info, structure, final_state)
 
         # Get node class
         node_class = get_node_class_from_type(node_info.node_type)
@@ -53,14 +53,17 @@ def compute_local_weight_gradients(
         grad_params = node_class.compute_params_gradient(
             params.nodes[node_name],
             in_edges_data,
-            final_state.gain_mod_error[node_name],
-            node_info.node_config
+            final_state.nodes[node_name],
+            node_info
         )
 
         # Store gradients
         gradients[node_name] = grad_params
 
-    return GraphParams(nodes=gradients)
+    # convert to GraphParams
+    params_gradients = GraphParams(nodes=gradients)
+
+    return params_gradients
 
 
 def train_step(
@@ -72,7 +75,6 @@ def train_step(
     rng_key: jax.Array,
     infer_steps: int,
     eta_infer: float = 0.1,
-    use_parallel: bool = False,
 ) -> Tuple[GraphParams, optax.OptState, float, GraphState]:
     """
     Single training step with local weight updates.
@@ -91,7 +93,6 @@ def train_step(
         rng_key: JAX random key for state initialization
         infer_steps: Number of inference steps
         eta_infer: Inference learning rate
-        use_parallel: Whether to use parallel inference
 
     Returns:
         Tuple of (updated_params, updated_opt_state, loss, final_state)
@@ -114,14 +115,14 @@ def train_step(
 
     # Run inference to convergence
     final_state = run_inference(
-        params, state, clamps, structure, infer_steps, eta_infer, use_parallel
+        params, state, clamps, structure, infer_steps, eta_infer
     )
 
     # Compute energy (sum of squared errors)
     energy = 0.0
     for node_name, node_info in structure.nodes.items():
         if node_info.in_degree > 0:  # Skip source nodes
-            energy += jnp.sum(final_state.error[node_name] ** 2)
+            energy += jnp.sum(final_state.nodes[node_name].error ** 2)
 
     # Average over batch
     loss = energy / batch_size
@@ -155,7 +156,6 @@ def train_pcn(
             - num_epochs: Number of training epochs
             - infer_steps: number of inference steps
             - eta_infer: inference learning rate
-            - use_parallel: whether to use parallel inference
         rng_key: JAX random key (will be split for each batch)
         verbose: Whether to print progress
 
@@ -171,7 +171,6 @@ def train_pcn(
         ...     "num_epochs": 10,
         ...     "infer_steps": 20,
         ...     "eta_infer": 0.1,
-        ...     "use_parallel": True
         ... }
         >>> trained_params = train_pcn(params, structure, train_loader, train_config, train_key)
     """
@@ -184,13 +183,12 @@ def train_pcn(
     # Training hyperparameters
     infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)
-    use_parallel = config.get("use_parallel", False)
     num_epochs = config.get("num_epochs", 10)
 
     # Create JIT-compiled training step
     jit_train_step = jax.jit(
         lambda p, o, b, k: train_step(
-            p, o, b, structure, optimizer, k, infer_steps, eta_infer, use_parallel
+            p, o, b, structure, optimizer, k, infer_steps, eta_infer
         )
     )
 
@@ -254,7 +252,6 @@ def evaluate_pcn(
         config: Evaluation configuration with keys:
             - infer_steps: number of inference steps
             - eta_infer: inference learning rate
-            - use_parallel: whether to use parallel inference
         rng_key: JAX random key (will be split for each batch)
 
     Returns:
@@ -264,7 +261,6 @@ def evaluate_pcn(
 
     infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)
-    use_parallel = config.get("use_parallel", False)
 
     # Estimate number of batches
     try:
@@ -303,21 +299,21 @@ def evaluate_pcn(
             structure, batch_size, batch_keys[batch_idx], clamps=clamps, params=params
         )
         final_state = run_inference(
-            params, state, clamps, structure, infer_steps, eta_infer, use_parallel
+            params, state, clamps, structure, infer_steps, eta_infer
         )
 
         # Compute loss
         energy = 0.0
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:
-                energy += jnp.sum(final_state.error[node_name] ** 2)
+                energy += jnp.sum(final_state.nodes[node_name].error ** 2)
         energy = energy / batch_size
         total_loss += float(energy) * batch_size
 
         # Compute accuracy (if applicable)
         if "y" in structure.task_map:
             y_node = structure.task_map["y"]
-            predictions = final_state.z_latent[y_node]
+            predictions = final_state.nodes[y_node].z_latent
             targets = batch["y"]
 
             # Assume classification: argmax predictions

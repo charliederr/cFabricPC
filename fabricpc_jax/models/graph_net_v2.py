@@ -17,6 +17,7 @@ from fabricpc_jax.core.types import (
     EdgeInfo,
     NodeParams,
     GraphParams,
+    NodeState,
     GraphState,
     GraphStructure,
     SlotInfo,
@@ -332,14 +333,6 @@ def initialize_state(
     Returns:
         Initial GraphState with latent gradients
     """
-    z_latent = {}
-    z_mu = {}
-    error = {}
-    energy = {}
-    pre_activation = {}
-    gain_mod_error = {}
-    latent_grad = {}
-
     clamps = clamps or {}
 
     # Use default if not provided
@@ -353,65 +346,81 @@ def initialize_state(
     node_names = list(structure.nodes.keys())
     node_keys = jax.random.split(rng_key, len(node_names))
     node_key_map = dict(zip(node_names, node_keys))
+    node_state_dict = {}
 
     # Initialize all nodes
     for node_name, node_info in structure.nodes.items():
         shape = (batch_size, node_info.dim)
 
         # Initialize z_latent
+        z_latent = None
         if node_name in clamps:
             # Use clamped value
-            z_latent[node_name] = clamps[node_name]
+            z_latent = clamps[node_name]
         elif init_method == "zeros":
-            z_latent[node_name] = jnp.zeros(shape)
+            z_latent = jnp.zeros(shape)
         elif init_method in ["uniform", "normal"]:
             # Direct initialization with split key
-            z_latent[node_name] = initialize_state_values(
+            z_latent = initialize_state_values(
                 fallback_config, node_key_map[node_name], shape
             )
         elif init_method == "feedforward":
             # Initialize with fallback first using split key
-            z_latent[node_name] = initialize_state_values(
+            z_latent = initialize_state_values(
                 fallback_config, node_key_map[node_name], shape
             )
         else:
             raise ValueError(f"Unknown init_method: {init_method}")
 
         # Initialize other state components to zeros
-        z_mu[node_name] = jnp.zeros(shape)
-        error[node_name] = jnp.zeros(shape)
-        energy[node_name] = jnp.zeros(())  # Scalar zero
-        pre_activation[node_name] = jnp.zeros(shape)
-        gain_mod_error[node_name] = jnp.zeros(shape)
-        latent_grad[node_name] = jnp.zeros(shape)
+        node_state_dict[node_name] = NodeState(
+            z_latent=z_latent,  # init latent state
+            z_mu=jnp.zeros(shape),
+            error=jnp.zeros(shape),
+            energy=jnp.zeros(()),  # Scalar zero
+            pre_activation=jnp.zeros(shape),
+            gain_mod_error=jnp.zeros(shape),
+            latent_grad=jnp.zeros(shape),
+            substructure={},
+        )
 
     # Feedforward initialization if requested
     if init_method == "feedforward" and params is not None:
         from fabricpc_jax.core.inference_v2 import compute_node_projection
 
+        # create a draft graph state
+        state = GraphState(
+            nodes=node_state_dict,
+            batch_size=batch_size,
+        )
+
         # Process nodes in topological order
         for node_name in structure.node_order:
             if node_name not in clamps and structure.nodes[node_name].in_degree > 0:
                 # Compute forward projection
-                z_mu_init, pre_act_init = compute_node_projection(
-                    params, z_latent, node_name, structure
+                z_mu_init, pre_act_init, sub_state = compute_node_projection(
+                    params, state, node_name, structure
                 )
-                z_latent[node_name] = z_mu_init
-                z_mu[node_name] = z_mu_init
-                pre_activation[node_name] = pre_act_init
+                # update the state with feedforward values
+                # assign z_latent <- z_mu_init
+                # BUG FIX: _replace() returns a new object, must assign it!
+                node_state_dict[node_name] = node_state_dict[node_name]._replace(
+                    z_latent=z_mu_init,
+                    z_mu=z_mu_init,
+                    pre_activation=pre_act_init,
+                    substructure=sub_state,
+                )
+
+    # create a draft graph state
+    state = GraphState(
+        nodes=node_state_dict,
+        batch_size=batch_size,
+    )
 
     # Compute the initial energy
-    error, gain_mod_error, energy = compute_errors(z_latent, z_mu, pre_activation, structure)
+    state = compute_errors(state, structure)
 
-    return GraphState(
-        z_latent=z_latent,
-        z_mu=z_mu,
-        error=error,
-        energy=energy,
-        pre_activation=pre_activation,
-        gain_mod_error=gain_mod_error,
-        latent_grad=latent_grad,
-    )
+    return state
 
 
 def create_pc_graph(

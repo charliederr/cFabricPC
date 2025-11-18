@@ -4,7 +4,7 @@ Core JAX types for predictive coding networks.
 All types are immutable and registered as JAX pytrees for automatic differentiation.
 """
 
-from typing import Dict, Any, Tuple, NamedTuple, Optional
+from typing import Dict, Any, Tuple, NamedTuple
 import jax.numpy as jnp
 from jax import tree_util
 from dataclasses import dataclass
@@ -72,6 +72,28 @@ class GraphParams(NamedTuple):
                 total_params += sum(b.size for b in node_params.biases.values())
         return f"GraphParams(nodes={n_nodes}, total_params={total_params})"
 
+class NodeState(NamedTuple):
+    """
+    Dynamic state of the Node during inference.
+
+    Attributes:
+        z_latent: Latent states (what the network infers)
+        z_mu: Predicted expectations (what the network predicts)
+        error: Prediction errors (z_latent - z_mu)
+        pre_activation: Pre-activation values (before activation function)
+        latent_grad: Gradients w.r.t. latent states for inference updates
+        gain_mod_error: Gain-modulated errors (error * activation_derivative)
+        substructure: Dictionary of node internal states for complex nodes
+    """
+
+    z_latent: jnp.ndarray
+    z_mu: jnp.ndarray
+    error: jnp.ndarray
+    energy: jnp.ndarray
+    pre_activation: jnp.ndarray
+    latent_grad: jnp.ndarray  # For local gradient accumulation
+    gain_mod_error: jnp.ndarray  # gain modulated error per node, for gradient computation
+    substructure: Dict[str, jnp.ndarray]  # substructure of node internal states
 
 class GraphState(NamedTuple):
     """
@@ -80,27 +102,15 @@ class GraphState(NamedTuple):
     All states are dictionaries mapping node names to arrays.
 
     Attributes:
-        z_latent: Latent states (what the network infers)
-        z_mu: Predicted expectations (what the network predicts)
-        error: Prediction errors (z_latent - z_mu)
-        pre_activation: Pre-activation values (before activation function)
-        gain_mod_error: Gain-modulated errors (error * activation_derivative)
-        latent_grad: Gradients w.r.t. latent states for inference updates
+        nodes: Dictionary mapping node names to NodeState
+        batch_size: Current batch size
     """
-
-    z_latent: Dict[str, jnp.ndarray]
-    z_mu: Dict[str, jnp.ndarray]
-    error: Dict[str, jnp.ndarray]
-    energy: Dict[str, jnp.ndarray]
-    pre_activation: Dict[str, jnp.ndarray]
-    gain_mod_error: Dict[str, jnp.ndarray]  # TODO deprecate
-    latent_grad: Dict[str, jnp.ndarray]  # For local gradient accumulation
+    nodes: Dict[str, NodeState]  # {node_name: NodeState}
+    batch_size: int
 
     def __repr__(self) -> str:
-        n_nodes = len(self.z_latent)
-        batch_size = next(iter(self.z_latent.values())).shape[0] if self.z_latent else 0
-        return f"GraphState(nodes={n_nodes}, batch_size={batch_size})"
-
+        n_nodes = len(self.nodes)
+        return f"GraphState(nodes={n_nodes}, batch_size={self.batch_size})"
 
 class GraphStructure(NamedTuple):
     """
@@ -140,12 +150,21 @@ tree_util.register_pytree_node(
 )
 
 tree_util.register_pytree_node(
-    GraphState,
-    lambda gs: (
-        (gs.z_latent, gs.z_mu, gs.error, gs.energy, gs.pre_activation, gs.gain_mod_error, gs.latent_grad),
+    NodeState,
+    lambda ns: (
+        (ns.z_latent, ns.z_mu, ns.error, ns.energy, ns.pre_activation, ns.latent_grad, ns.gain_mod_error, ns.substructure),
         None,
     ),
-    lambda aux, children: GraphState(*children),
+    lambda aux, children: NodeState(*children),
+)
+
+tree_util.register_pytree_node(
+    GraphState,
+    lambda gs: (
+        (gs.nodes,),        # Dynamic children (differentiable)
+        (gs.batch_size,),   # Static auxiliary data (metadata)
+    ),
+    lambda aux, children: GraphState(children[0], aux[0]),
 )
 
 # GraphStructure is static, so we register it as having no dynamic components

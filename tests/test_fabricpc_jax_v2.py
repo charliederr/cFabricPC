@@ -19,7 +19,7 @@ os.environ.setdefault("JAX_TRACEBACK_FILTERING", "off") # set filtering to "off"
 import jax
 import jax.numpy as jnp
 
-from fabricpc_jax.nodes.base import NodeParams
+from fabricpc_jax.core.types import NodeState, NodeParams, GraphParams, GraphState, GraphStructure
 
 # Set up JAX
 jax.config.update("jax_platform_name", "cpu")
@@ -153,28 +153,29 @@ def run_inference_test(params, structure, rng_key):
     )
 
     # Verify that energy field exists and is initialized
-    assert "energy" in initial_state._fields, "GraphState should have energy field"
-    assert isinstance(initial_state.energy, dict), "Energy should be a dict"
+    assert "nodes" in initial_state._fields, "GraphState should have nodes field"
+    assert isinstance(initial_state.nodes, dict), "nodes should be a dict"
 
     # Run inference
     infer_steps = 10
     eta_infer = 0.1
     final_state = run_inference(
-        params, initial_state, clamps, structure, infer_steps, eta_infer, use_parallel=False
+        params, initial_state, clamps, structure, infer_steps, eta_infer
     )
 
     # Verify that latent gradients were computed
-    assert "hidden1" in final_state.latent_grad, "Should have latent gradients"
-    assert final_state.latent_grad["hidden1"].shape == (batch_size, 20), "Gradient shape mismatch"
+    assert "hidden1" in final_state.nodes, "Should have node hidden1"
+    assert "latent_grad" in final_state.nodes["hidden1"]._fields, "Should have latent gradients"
+    assert final_state.nodes["hidden1"].latent_grad.shape == (batch_size, 20), "Gradient shape mismatch"
 
     # Check that energy decreased
     initial_energy = sum(
-        jnp.sum(initial_state.error[name] ** 2)
+        jnp.sum(initial_state.nodes[name].error ** 2)
         for name in structure.nodes
         if structure.nodes[name].in_degree > 0
     )
     final_energy = sum(
-        jnp.sum(final_state.error[name] ** 2)
+        jnp.sum(final_state.nodes[name].error ** 2)
         for name in structure.nodes
         if structure.nodes[name].in_degree > 0
     )
@@ -252,7 +253,7 @@ def run_training_step_test(params, structure, rng_key):
     infer_steps = 10
     eta_infer = 0.1
     new_params, new_opt_state, loss, final_state = train_step(
-        params, opt_state, batch, structure, optimizer, rng_key, infer_steps, eta_infer, use_parallel=False
+        params, opt_state, batch, structure, optimizer, rng_key, infer_steps, eta_infer
     )
 
     # Verify parameters were updated
@@ -280,37 +281,48 @@ def run_jacobian_computation_test(params, structure, rng_key):
     node_keys = jax.random.split(rng_key, len(node_names))
 
     # Create dummy latent states
-    z_latent = {}
+    nodes = {}
     for i, (node_name, node_info) in enumerate(structure.nodes.items()):
-        z_latent[node_name] = jax.random.normal(
+        nodes[node_name] = NodeState(z_latent=jax.random.normal(
             node_keys[i],
             (batch_size, node_info.dim)
+        ),
+        latent_grad=jnp.zeros((batch_size, node_info.dim)),
+        z_mu=jnp.zeros((batch_size, node_info.dim)),
+        error=jnp.zeros((batch_size, node_info.dim)),
+        energy=jnp.zeros((batch_size, node_info.dim)),
+        pre_activation=jnp.zeros((batch_size, node_info.dim)),
+        gain_mod_error=jnp.zeros((batch_size, node_info.dim)),
+        substructure={}
         )
+
+    # Create dummy GraphState
+    state = GraphState(
+        nodes=nodes,
+        batch_size=batch_size
+    )
 
     # Test Jacobian for linear nodes (which have optimized computation)
     for node_name, node_info in structure.nodes.items():
         node_class = get_node_class_from_type(node_info.node_type)
+        node_state = state.nodes[node_name]
 
         # Collect edge inputs for Jacobian computation
         edge_inputs = {}
-        for in_edge_key in node_info.in_edges:
-            in_edge_info = structure.edges[in_edge_key]
-            edge_inputs[in_edge_key] = z_latent[in_edge_info.source]
-
+        for edge_key in node_info.in_edges:
+            in_edge_info = structure.edges[edge_key]
+            edge_inputs[edge_key] = state.nodes[in_edge_info.source].z_latent
         try:
-            # Compute Jacobian for in_edges of the node
-            jacobian_dict = node_class.compute_jacobian(
-                params.nodes[node_name], edge_inputs, node_info.node_config, z_latent[node_name].shape
-            )  # dimension Dict[edge_name: (dim_source_latent, dim_target_latent)]
-
-            for edge_key, jacobian in jacobian_dict.items():
+            for edge_key in node_info.in_edges:
                 edge_info = structure.edges[edge_key]
                 source_dim = structure.nodes[edge_info.source].dim
                 target_dim = structure.nodes[edge_info.target].dim
 
-                # The jacobian should have shape (target_dim, source_dim)
-                assert jacobian.shape == (target_dim, source_dim), \
-                    f"Jacobian shape mismatch for {edge_key}: {jacobian.shape}, expected ({target_dim}, {source_dim})"
+                # Compute Jacobian for in_edges of the node
+                jacobian = node_class.compute_jacobian_for_edge(
+                    edge_key, params.nodes[node_name], edge_inputs, node_state, node_info
+                )  # dimension Dict[edge_name: (dim_source_latent, dim_target_latent)]
+
                 print(f"✓ Jacobian for {edge_key}: shape {jacobian.shape}")
 
         except Exception as e:

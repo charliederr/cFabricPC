@@ -5,8 +5,7 @@ This module implements the functional inference loop that updates latent states
 using local gradients computed via Jacobian for true predictive coding.
 """
 
-from typing import Dict, Tuple, Optional
-from functools import partial
+from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 
@@ -19,7 +18,7 @@ from fabricpc_jax.core.types import NodeParams, NodeInfo
 def gather_inputs(
         node_info: NodeInfo,
         structure: GraphStructure,
-        z_latent: Dict[str, jax.Array],  # node_name -> latent state
+        state: GraphState,
 ) -> Dict[str, jax.Array]:
     """
     Gather inputs for a node from the graph structure.
@@ -27,186 +26,225 @@ def gather_inputs(
     in_edges_data = {}
     for edge_key in node_info.in_edges:
         edge_info = structure.edges[edge_key]  # get the edge object
-        in_edges_data[edge_key] = z_latent[edge_info.source]  # get the data sent along this edge
+        node = edge_info.source
+        in_edges_data[edge_key] = state.nodes[node].z_latent  # get the data sent along this edge
 
     return in_edges_data
 
 
 def compute_node_projection(
     params: GraphParams,
-    z_latent: Dict[str, jnp.ndarray],
+    state: GraphState,
     node_name: str,
     structure: GraphStructure,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict[str, jnp.ndarray]]:
     """
     Compute prediction z_mu for a node from its incoming connections.
 
     Args:
         params: Model parameters organized by node
-        z_latent: Current latent states for all nodes
+        state: Current states for all nodes
         node_name: Name of the node to compute prediction for
         structure: Static graph structure
 
     Returns:
-        Tuple of (z_mu, pre_activation)
+        Tuple of (z_mu, pre_activation, substructure_state)
     """
     node_info = structure.nodes[node_name]
     node_class = get_node_class_from_type(node_info.node_type)
 
     # Source nodes (no incoming edges) have zero prediction
     if node_info.in_degree == 0:
-        batch_size = next(iter(z_latent.values())).shape[0]
+        batch_size = state.batch_size
         zero_pred = jnp.zeros((batch_size, node_info.dim))
-        return zero_pred, zero_pred
+        return zero_pred, zero_pred, {}
 
     # Get node's parameters
     default_empty = NodeParams(weights={}, biases={})
     node_params = params.nodes.get(node_name, default_empty)
 
     # Gather inputs for each slot
-    in_edges_data = gather_inputs(node_info, structure, z_latent)
+    in_edges_data = gather_inputs(node_info, structure, state)
 
     # Forward pass through node
-    z_mu, pre_activation = node_class.forward(
+    z_mu, pre_activation, substructure_state = node_class.forward(
         node_params,
         in_edges_data,
-        node_info.node_config,
-        z_latent[node_name].shape
+        node_info,
+        state.nodes[node_name].z_latent.shape
     )
-    return z_mu, pre_activation
+    return z_mu, pre_activation, substructure_state
 
 
-def compute_latent_gradients_local(
-    error: Dict[str, jnp.ndarray],
-    gain_mod_error: Dict[str, jnp.ndarray],
+def compute_latent_gradients(
+    state: GraphState,
     params: GraphParams,
-    z_latent: Dict[str, jnp.ndarray],
     structure: GraphStructure,
-) -> Dict[str, jnp.ndarray]:
+) -> GraphState:
     """
-    Compute gradient of energy w.r.t. latent states using local Jacobian.
-
-    For each node i:
-        grad_i = error_i - sum_j (error_j @ jacobian_{j->i})
-
-    error_i (batch_size, dim_i)
-    error_j (batch_size, dim_j)
-    jacobian_{j->i} (dim_j, dim_i), del z_mu_j / del z_i
-
-    This implements true predictive coding with local gradient computation.
+    Compute gradient of energy w.r.t. latent states
+    Propagate errors back to presynaptic latents
 
     Args:
-        error: Prediction errors for all nodes
-        gain_mod_error: Gain-modulated errors for all nodes
+        state: Current graph state
         params: Model parameters
-        z_latent: Current latent states keyed on node names
         structure: Graph structure
 
     Returns:
-        Dictionary of gradients w.r.t. latent states
+        Updated graph state with latent gradients
     """
-    # Zero the latent gradients
-    latent_grads = {}  # dimension Dict[node_name: (batch_size, dim_node_latent)]
-    for node in structure.nodes:
-        latent_grads[node] = jnp.zeros_like(z_latent[node])
 
-    # Start with local error contribution
-    for node in structure.nodes:
-        latent_grads[node] = latent_grads[node] + error[node].copy()
+    # Zero the latent gradients
+    for node_name in structure.nodes:
+        # Reset gradients
+        node_state = state.nodes[node_name]
+        grad = jnp.zeros_like(node_state.z_latent)
+
+        # Replace the latent gradient in state
+        state = state._replace(
+            nodes={
+                **state.nodes,
+                node_name: state.nodes[node_name]._replace(
+                    latent_grad=grad
+                )
+            }
+        )
 
     # Backpropagate errors to pre-synaptic nodes through Jacobians
-    for node, node_info in structure.nodes.items():
+    for node_name, node_info in structure.nodes.items():
+        node_state = state.nodes[node_name]
         node_class = get_node_class_from_type(node_info.node_type)
 
         # Collect edge inputs for Jacobian computation
-        edge_inputs = {}
-        for in_edge_key in node_info.in_edges:
-            in_edge_info = structure.edges[in_edge_key]
-            edge_inputs[in_edge_key] = z_latent[in_edge_info.source]
+        edge_inputs = gather_inputs(node_info, structure, state)
 
-        # Compute Jacobian for in_edges of the node
-        jacobian_dict = node_class.compute_jacobian(
-            params.nodes[node], edge_inputs, node_info.node_config, z_latent[node].shape
-        )  #  dimension Dict[edge_name: (dim_source_latent, dim_target_latent)]
+        # Backpropagate error on edges and to self
+        grad_contrib = node_class.compute_gradient(
+            params.nodes[node_name], edge_inputs, node_state, node_info, structure
+        )
+        # Accumulate gradient contributions to this node's sources (including self)
+        for source_name, grad in grad_contrib.items():
+            latent_grad = state.nodes[source_name].latent_grad
+            latent_grad = latent_grad + grad  # Send gradient contribution to source node
+            # Update the state with new latent gradients
+            state = state._replace(
+                nodes={
+                    **state.nodes,
+                    source_name: state.nodes[source_name]._replace(
+                        latent_grad=latent_grad
+                    )
+                }
+            )
 
-        # Backpropagate error on edges
-        for edge_key, jacob in jacobian_dict.items():
-            edge_info = structure.edges[edge_key]
-            source_name = edge_info.source
-            latent_grads[source_name] = latent_grads[source_name] - jnp.matmul(error[node], jacob)
+    # TODO if using preactivation latents, multiply by activation derivative here
+    # if latent_type == "preactivation":
+    #     for node_name in structure.nodes:
+    #         node_state = state.nodes[node_name]
+    #         node_info = structure.nodes[node_name]
+    #         _, act_deriv = get_activation(node_info.activation_config)
+    #         latent_grad = state.nodes[node_name].latent_grad
+    #         latent_grad = latent_grad * act_deriv(node_state.pre_activation)
+    #         # Update the state with new latent gradients
+    #         state = state._replace(
+    #             nodes={
+    #                 **state.nodes,
+    #                 node_name: state.nodes[node_name]._replace(
+    #                     latent_grad=latent_grad
+    #                 )
+    #             }
+    #         )
 
-    return latent_grads
-
+    return state
 
 def compute_all_projections(
     params: GraphParams,
-    z_latent: Dict[str, jnp.ndarray],
+    state: GraphState,
     structure: GraphStructure,
-) -> Tuple[Dict[str, jnp.ndarray], Dict[str, jnp.ndarray]]:
+) -> GraphState:
     """
     Compute predictions for all nodes in the graph.
 
     Args:
         params: Model parameters
-        z_latent: Current latent states
+        state: Current graph state
         structure: Graph structure
 
     Returns:
-        Tuple of (z_mu_dict, pre_activation_dict)
+        Updated graph state with predictions
     """
-    z_mu = {}
-    pre_activation = {}
 
     # Use node_order for efficient traversal
     for node_name in structure.node_order:
-        z_mu[node_name], pre_activation[node_name] = compute_node_projection(
-            params, z_latent, node_name, structure
+        node_state = state.nodes[node_name]
+
+        # Compute prediction for this node
+        z_mu, pre_activation, substructure_state = compute_node_projection(
+            params, state, node_name, structure
         )
 
-    return z_mu, pre_activation
+        # Update the state with new predictions
+        state = state._replace(
+            nodes={
+                **state.nodes,
+                node_name: state.nodes[node_name]._replace(
+                    z_mu=z_mu,
+                    pre_activation=pre_activation,
+                    substructure=substructure_state                )
+            }
+        )
+
+    return state
 
 
 def compute_errors(
-    z_latent: Dict[str, jnp.ndarray],
-    z_mu: Dict[str, jnp.ndarray],
-    pre_activation: Dict[str, jnp.ndarray],
+    state: GraphState,
     structure: GraphStructure,
-) -> Tuple[Dict[str, jnp.ndarray], Dict[str, jnp.ndarray], Dict[str, jnp.ndarray]]:
+) -> GraphState:
     """
     Compute prediction errors and gain-modulated errors.
 
     Args:
-        z_latent: Current latent states
-        z_mu: Predicted states
-        pre_activation: Pre-activation values
+        state: Current graph state
         structure: Graph structure
 
     Returns:
-        Tuple of (error, gain_mod_error, energy)
+        Updated graph state with errors and gain-modulated errors
     """
-    error = {}
-    gain_mod_error = {}
-    energy = {}
 
     for node_name in structure.nodes:
+        error = None
+        gain_mod_error = None
+        energy = None
+
         node_info = structure.nodes[node_name]
+        node_state = state.nodes[node_name]
 
         # Compute basic error
-        err = z_latent[node_name] - z_mu[node_name]
-        error[node_name] = err
-        energy[node_name] = jnp.sum(err ** 2)  # TODO call the node energy functional method
+        error = node_state.z_latent - node_state.z_mu
+        energy = jnp.sum(error ** 2)  # TODO call the node energy functional method
 
         # Compute gain-modulated error
         if node_info.in_degree == 0:
             # Source nodes have no prediction
-            gain_mod_error[node_name] = jnp.zeros_like(err)
+            gain_mod_error = jnp.zeros_like(error)
         else:
             _, deriv_fn = get_activation(node_info.activation_config)
-            gain = deriv_fn(pre_activation[node_name])
-            gain_mod_error[node_name] = err * gain
+            gain = deriv_fn(node_state.pre_activation)
+            gain_mod_error = error * gain
 
-    return error, gain_mod_error, energy
+        # Update the state with new errors
+        state = state._replace(
+            nodes={
+                **state.nodes,
+                node_name: state.nodes[node_name]._replace(
+                    error=error,
+                    gain_mod_error=gain_mod_error,
+                    energy=energy
+                )
+            }
+        )
 
+    return state
 
 def inference_step(
     params: GraphParams,
@@ -229,133 +267,35 @@ def inference_step(
         Updated graph state
     """
     # 1. Compute predictions for all nodes
-    z_mu, pre_activation = compute_all_projections(params, state.z_latent, structure)
+    state = compute_all_projections(params, state, structure)
 
     # 2. Compute errors
-    error, gain_mod_error, energy = compute_errors(
-        state.z_latent, z_mu, pre_activation, structure
-    )
+    state = compute_errors(state, structure)
 
-    # 3. Compute LOCAL gradient using Jacobian
-    latent_grads = compute_latent_gradients_local(
-        error, gain_mod_error, params, state.z_latent, structure
-    )
+    # 3. Compute gradients, local to each node
+    state = compute_latent_gradients(state, params, structure)
 
     # 4. Update latent states
-    new_z_latent = {}
     for node_name in structure.nodes:
+        node_state = state.nodes[node_name]
+        new_z_latent = None
         if node_name in clamps:
             # Keep clamped nodes fixed
-            new_z_latent[node_name] = clamps[node_name]
+            new_z_latent = clamps[node_name]
         else:
             # Update via gradient descent
-            new_z_latent[node_name] = (
-                state.z_latent[node_name] - eta_infer * latent_grads[node_name]
-            )
-
-    return GraphState(
-        z_latent=new_z_latent,
-        z_mu=z_mu,
-        error=error,
-        energy=energy,
-        pre_activation=pre_activation,
-        gain_mod_error=gain_mod_error,
-        latent_grad=latent_grads,  # Store gradients for inspection
-    )
-
-
-def inference_step_parallel(
-    params: GraphParams,
-    state: GraphState,
-    clamps: Dict[str, jnp.ndarray],
-    structure: GraphStructure,
-    eta_infer: float,
-) -> GraphState:
-    """
-    Single inference step with parallel node updates using vmap.
-
-    This is an optimized version that updates all nodes in parallel.
-
-    Args:
-        params: Model parameters
-        state: Current graph state
-        clamps: Dictionary of clamped values
-        structure: Graph structure
-        eta_infer: Inference learning rate
-
-    Returns:
-        Updated graph state
-    """
-    # Stack all latent states into a single array for parallel processing
-    node_names = list(structure.nodes.keys())
-    batch_size = next(iter(state.z_latent.values())).shape[0]
-
-    [print(state.z_latent[name].shape) for name in node_names]
-    # Create stacked arrays
-    z_latent_stacked = jnp.stack([state.z_latent[name] for name in node_names], axis=0)
-
-    # Define per-node update function
-    def update_node(node_idx, z_latent_node):
-        node = node_names[node_idx]
-        node_info = structure.nodes[node]
-
-        # Compute projection for this node
-        z_latent_dict = {name: z_latent_stacked[i] for i, name in enumerate(node_names)}
-        z_mu_node, pre_act_node = compute_node_projection(
-            params, z_latent_dict, node, structure
+            new_z_latent = node_state.z_latent - eta_infer * node_state.latent_grad
+        # Update the state
+        state = state._replace(
+            nodes={
+                **state.nodes,
+                node_name: state.nodes[node_name]._replace(
+                    z_latent=new_z_latent
+                )
+            }
         )
 
-        # Compute error
-        error_node = z_latent_node - z_mu_node
-        energy_node = jnp.sum(error_node ** 2)  # TODO call the node energy functional method
-        # Compute gain-modulated error
-        if node_info.in_degree > 0:
-            _, deriv_fn = get_activation(node_info.activation_config)
-            gain = deriv_fn(pre_act_node)
-            gain_mod_error_node = error_node * gain
-        else:
-            gain_mod_error_node = jnp.zeros_like(error_node)
-
-        return z_mu_node, pre_act_node, error_node, gain_mod_error_node, energy_node
-
-    # Apply vmap over all nodes
-    node_indices = jnp.arange(len(node_names))
-    z_mu_stacked, pre_act_stacked, error_stacked, gain_mod_stacked, energy_stacked = jax.vmap(
-        update_node, in_axes=(0, 0)
-    )(node_indices, z_latent_stacked)
-
-    # Convert back to dictionaries
-    z_mu = {name: z_mu_stacked[i] for i, name in enumerate(node_names)}
-    pre_activation = {name: pre_act_stacked[i] for i, name in enumerate(node_names)}
-    error = {name: error_stacked[i] for i, name in enumerate(node_names)}
-    gain_mod_error = {name: gain_mod_stacked[i] for i, name in enumerate(node_names)}
-    energy = {name: energy_stacked[i] for i, name in enumerate(node_names)}
-
-    # Compute gradients (still sequential for now, could be optimized)
-    latent_grads = compute_latent_gradients_local(
-        error, gain_mod_error, params, state.z_latent, structure
-    )
-
-    # Update latent states
-    new_z_latent = {}
-    for node_name in node_names:
-        if node_name in clamps:
-            new_z_latent[node_name] = clamps[node_name]
-        else:
-            new_z_latent[node_name] = (
-                state.z_latent[node_name] - eta_infer * latent_grads[node_name]
-            )
-
-    return GraphState(
-        z_latent=new_z_latent,
-        z_mu=z_mu,
-        error=error,
-        energy=energy,
-        pre_activation=pre_activation,
-        gain_mod_error=gain_mod_error,
-        latent_grad=latent_grads,
-    )
-
+    return state
 
 def run_inference(
     params: GraphParams,
@@ -364,7 +304,6 @@ def run_inference(
     structure: GraphStructure,
     infer_steps: int,
     eta_infer: float = 0.1,
-    use_parallel: bool = False,
 ) -> GraphState:
     """
     Run inference for infer_steps steps to converge latent states.
@@ -376,15 +315,13 @@ def run_inference(
         structure: Graph structure
         infer_steps: Number of inference steps
         eta_infer: Inference learning rate
-        use_parallel: Whether to use parallel node updates
 
     Returns:
         Final converged graph state
     """
-    inference_fn = inference_step_parallel if use_parallel else inference_step
 
     def body_fn(t, state):
-        return inference_fn(params, state, clamps, structure, eta_infer)
+        return inference_step(params, state, clamps, structure, eta_infer)
 
     # Use lax.fori_loop for efficiency
     final_state = jax.lax.fori_loop(0, infer_steps, body_fn, initial_state)

@@ -147,7 +147,7 @@ def train_step_pmap(
         energy = 0.0
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:
-                energy += jnp.sum(final_state.error[node_name] ** 2)
+                energy += jnp.sum(final_state.nodes[node_name].error ** 2)
 
         energy = energy / batch_size
 
@@ -374,7 +374,7 @@ def evaluate_pcn_multi_gpu(
         # (We need to reshape back from (n_devices, batch_per_device, ...) to (batch_size, ...))
         if "y" in structure.task_map:
             y_node = structure.task_map["y"]
-            predictions = final_states.z_latent[y_node]  # (n_devices, batch_per_device, dim)
+            predictions = final_states[y_node].z_latent  # (n_devices, batch_per_device, dim)
             predictions = predictions.reshape(batch_size, -1)
             targets = batch["y"]
 

@@ -33,11 +33,10 @@ from fabricpc_jax.core.activations import (
 # Inference functions
 from fabricpc_jax.core.inference_v2 import (
     compute_node_projection,
-    compute_latent_gradients_local,
+    compute_latent_gradients,
     compute_all_projections,
     compute_errors,
     inference_step,
-    inference_step_parallel,
     run_inference,
 )
 
@@ -77,11 +76,10 @@ __all__ = [
     "ACTIVATIONS",
     # Inference
     "compute_node_projection",
-    "compute_latent_gradients_local",
+    "compute_latent_gradients",
     "compute_all_projections",
     "compute_errors",
     "inference_step",
-    "inference_step_parallel",
     "run_inference",
     # Initialization
     "initialize_weights",
