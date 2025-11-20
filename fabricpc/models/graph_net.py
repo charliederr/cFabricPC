@@ -74,9 +74,9 @@ class PCGraphNet(PCNet):
         # Make sure node names are unique
         node_names = [node_params["name"] for node_params in node_list]
         if len(node_names) != len(set(node_names)):
-            raise ValueError("Node names must be unique")
+            raise ValueError("node names must be unique")
         if len(self.node_dictionary) > 0 or len(self.edge_dictionary) > 0:
-            raise ValueError("Graph already exists!")
+            raise ValueError("graph already exists!")
 
         # Build nodes
         for node_cfg in node_list:
@@ -159,12 +159,12 @@ class PCGraphNet(PCNet):
             elif self.init_method.lower() == "normal":
                 node.z_latent.normal_(0, self.latent_init_std)
             else:
-                raise ValueError(f"Unknown init method {self.init_method}")
+                raise ValueError(f"unknown init method {self.init_method}")
 
         # Validate clamps and apply
         for name, val in self.clamp_dict.items():
             if name not in self.node_dictionary:
-                raise ValueError(f"Clamp key '{name}' not found among graph nodes.")
+                raise ValueError(f"clamp key '{name}' not found among graph nodes.")
             node = self.node_dictionary[name]
             if val.dim() != 2 or val.size(1) != node.dim:
                 raise ValueError(
@@ -299,7 +299,7 @@ class PCGraphNet(PCNet):
         # Graph model: key is a node name
         if key in self.node_dictionary:
             return self.node_dictionary[key].dim
-        raise ValueError(f"Unable to resolve dimension for unknown node {key}")
+        raise ValueError(f"unable to resolve dimension for unknown node {key}")
 
     def get_total_energy(self, energy_record: list, selection_list: list):
         if energy_record is not None:

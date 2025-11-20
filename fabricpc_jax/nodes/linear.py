@@ -68,12 +68,12 @@ class LinearNode(NodeBase):
         key_w, key_b = jax.random.split(key)
 
         # Initialize weight matrix
-        # "in" slot in multiinput; create separate weights for each incoming edge
+        # this node class uses multi-input "in" slot; create weights for each incoming edge
         weights_dict = {}
         rand_key_w = dict(zip(input_dims.keys(), jax.random.split(key_w, len(input_dims))))
         for edge_key, in_dim in input_dims.items():
             if ":in" not in edge_key:
-                raise ValueError(f"Linear node requires 'in' slot dimension. got edge key {edge_key}")  # validate that edges correspond to "in" slot
+                raise ValueError(f"linear node requires 'in' slot dimension. got edge key {edge_key}")  # validate that edges correspond to "in" slot
             weights_dict[edge_key] = initialize_weights(weight_init_config, rand_key_w[edge_key], (in_dim, node_dim))
             total_in_dim += in_dim
 
@@ -144,6 +144,7 @@ class LinearNode(NodeBase):
             inputs: Dictionary mapping edge key to input tensors
             node_state: Current node state (contains errors, pre-activations, etc.)
             node_info: Node configuration
+            structure: GraphStructure object
 
         Returns:
             Dictionary mapping node names to latent gradient contributions
@@ -151,7 +152,7 @@ class LinearNode(NodeBase):
 
         # Determine the energy functional to use for the node from its config
         energy_functional = "gaussian"  # TODO make configurable per node, node_info.config.get("energy_functional", "gaussian")
-        preactivationLatent = node_info.node_config.get("latenty_type") == "preactivation"
+        latent_is_preactivation = node_info.node_config.get("latent_type") == "preactivation"
         latent_grads = {}
 
         # Self energy gradient
@@ -165,8 +166,8 @@ class LinearNode(NodeBase):
                 latent_grads[source_name] = jnp.zeros_like(z)
 
             if energy_functional == "gaussian":
-                if preactivationLatent:
-                    raise NotImplementedError("Pre-activation latent type not implemented for LinearNode with Gaussian energy.")
+                if latent_is_preactivation:
+                    raise NotImplementedError("pre-activation latent type not implemented for LinearNode with Gaussian energy.")
                     grad_contribution = -jnp.matmul(node_state.error, params.weights[edge_key].T)
                     # error (batch, dim_t)
                     # weights{s->t} (dim_s, dim_t)
@@ -176,7 +177,7 @@ class LinearNode(NodeBase):
                     # gain_mod_error (batch, dim_t) = error * f'(a)
                     # weights{s->t} (dim_s, dim_t)
             else:
-                raise NotImplementedError(f"Energy functional '{energy_functional}' not implemented in LinearNode.")
+                raise NotImplementedError(f"energy functional '{energy_functional}' not implemented in LinearNode.")
                 # _, activation_deriv = get_activation(node_info.node_config.get("activation_config"))
                 # f_prime = activation_deriv(node_state.pre_activation)  # shape (batch_size, dim_node_latent)
 

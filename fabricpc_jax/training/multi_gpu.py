@@ -5,11 +5,10 @@ This module provides data-parallel training across multiple GPUs using pmap,
 which replicates the computation across devices and averages gradients.
 """
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, cast, Iterable
 import jax
 import jax.numpy as jnp
 import optax
-from functools import partial
 
 from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc_jax.core.inference import run_inference
@@ -94,6 +93,7 @@ def train_step_pmap(
     opt_state: optax.OptState,
     batch: Dict[str, jnp.ndarray],
     structure: GraphStructure,
+    rng_key: jax.Array,  # Added: RNG key for this device
     optimizer: optax.GradientTransformation,
     infer_steps: int,
     eta_infer: float = 0.1,
@@ -109,6 +109,7 @@ def train_step_pmap(
         params: Replicated parameters (has device axis)
         opt_state: Replicated optimizer state (has device axis)
         batch: Sharded batch (has device axis)
+        rng_key: JAX random key for this device
         structure: Graph structure
         optimizer: Optax optimizer
         infer_steps: Number of inference steps
@@ -116,7 +117,7 @@ def train_step_pmap(
         state_init_config: State initialization config (uses default if None)
 
     Returns:
-        Tuple of (updated_params, updated_opt_state, loss_per_device, final_state)
+        Tuple of (updated_params, updated_opt_state, loss_per_device, state)
     """
 
     def loss_fn(params: GraphParams) -> Tuple[float, GraphState]:
@@ -134,36 +135,37 @@ def train_step_pmap(
         # Initialize state
         # Use provided config or default
         init_config = state_init_config if state_init_config is not None else get_default_state_init()
-        state = initialize_state(
-            structure, batch_size, clamps=clamps, state_init_config=init_config, params=params
+        init_state = initialize_state(
+            structure, batch_size, rng_key, clamps=clamps, state_init_config=init_config, params=params
         )
 
         # Run inference
         final_state = run_inference(
-            params, state, clamps, structure, infer_steps, eta_infer
+            params, init_state, clamps, structure, infer_steps, eta_infer
         )
 
         # Compute energy
         energy = 0.0
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:
-                energy += jnp.sum(final_state.nodes[node_name].error ** 2)
+                energy += final_state.nodes[node_name].energy
 
         energy = energy / batch_size
 
         return energy, final_state
 
     # Compute loss and gradients on this device
-    (loss, final_state), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+    (loss, state), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
 
     # Average gradients across all devices (this is the key for data parallelism!)
     grads = jax.lax.pmean(grads, axis_name="devices")
 
     # Update parameters (each device now has same gradients)
     updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
+    params = cast(GraphParams, optax.apply_updates(params, updates))
+    # Note: optax.apply_updates preserves the structure but loses type info
 
-    return params, opt_state, loss, final_state
+    return params, opt_state, loss, state
 
 
 # Create pmap version of train_step
@@ -190,19 +192,19 @@ def create_pmap_train_step(
         Pmap'ed training step function
     """
 
-    def step_fn(params, opt_state, batch):
+    def step_fn(params, opt_state, batch, rng_key):
         return train_step_pmap(
-            params, opt_state, batch, structure, optimizer, infer_steps, eta_infer, state_init_config
+            params, opt_state, batch, structure, rng_key, optimizer, infer_steps, eta_infer, state_init_config
         )
 
     return jax.pmap(step_fn, axis_name="devices")
-
 
 def train_pcn_multi_gpu(
     params: GraphParams,
     structure: GraphStructure,
     train_loader: Any,
     config: dict,
+    rng_key: jax.Array,
     verbose: bool = True,
 ) -> GraphParams:
     """
@@ -213,6 +215,7 @@ def train_pcn_multi_gpu(
         structure: Graph structure
         train_loader: Data loader
         config: Training configuration
+        rng_key: JAX random key
         verbose: Whether to print progress
 
     Returns:
@@ -233,7 +236,7 @@ def train_pcn_multi_gpu(
         if verbose:
             print("Only 1 device available, falling back to single-GPU training")
         from fabricpc_jax.training import train_pcn
-        return train_pcn(params, structure, train_loader, config, verbose)
+        return train_pcn(params, structure, train_loader, config, rng_key, verbose)
 
     # Create optimizer
     optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))
@@ -256,7 +259,21 @@ def train_pcn_multi_gpu(
     for epoch in range(num_epochs):
         epoch_losses = []
 
+        # Split keys for this epoch's batches
+        epoch_key, rng_key = jax.random.split(rng_key)
+        device_keys = jax.random.split(epoch_key, n_devices)
+
+        # Estimate number of batches for key splitting
+        num_batches = len(train_loader)
+
+        # Create keys for all batches (split on each device)
+        batch_keys_per_device = jax.vmap(
+            lambda k: jax.random.split(k, num_batches)
+        )(device_keys)
+
         for batch_idx, batch_data in enumerate(train_loader):
+            batch_key_for_step = batch_keys_per_device[:, batch_idx]
+
             # Convert batch to JAX format
             if isinstance(batch_data, (list, tuple)):
                 batch = {
@@ -266,7 +283,7 @@ def train_pcn_multi_gpu(
             elif isinstance(batch_data, dict):
                 batch = {k: jnp.array(v) for k, v in batch_data.items()}
             else:
-                raise ValueError(f"Unsupported batch format: {type(batch_data)}")
+                raise ValueError(f"unsupported batch format: {type(batch_data)}")
 
             # Shard batch across devices
             try:
@@ -278,7 +295,7 @@ def train_pcn_multi_gpu(
 
             # Training step (parallelized across devices)
             params, opt_state, losses, _ = pmap_train_step(
-                params, opt_state, batch_sharded
+                params, opt_state, batch_sharded, batch_key_for_step
             )
 
             # Average losses from all devices
@@ -302,6 +319,7 @@ def evaluate_pcn_multi_gpu(
     structure: GraphStructure,
     test_loader: Any,
     config: dict,
+    rng_key: jax.Array,  # Added: RNG key for reproducibility
 ) -> Dict[str, float]:
     """
     Evaluate PCN using all available GPUs.
@@ -311,6 +329,7 @@ def evaluate_pcn_multi_gpu(
         structure: Graph structure
         test_loader: Test data loader
         config: Evaluation configuration
+        rng_key: JAX random key for reproducibility
 
     Returns:
         Dictionary of metrics
@@ -319,7 +338,10 @@ def evaluate_pcn_multi_gpu(
 
     if n_devices == 1:
         from fabricpc_jax.training import evaluate_pcn
-        return evaluate_pcn(params, structure, test_loader, config)
+        return evaluate_pcn(params, structure, test_loader, config, rng_key)
+
+    # Split keys for devices
+    device_keys = jax.random.split(rng_key, n_devices)
 
     # Replicate params across devices
     params = replicate_params(params, n_devices)
@@ -328,9 +350,17 @@ def evaluate_pcn_multi_gpu(
     eta_infer = config.get("eta_infer", 0.1)
     state_init_config = config.get("state_initialization", None)
 
+    # Estimate number of batches for key splitting
+    num_batches = len(test_loader)
+
+    # Create keys for all batches (split on each device)
+    batch_keys_per_device = jax.vmap(
+        lambda k: jax.random.split(k, num_batches)
+    )(device_keys)
+
     # Create pmap'ed inference function
-    def inference_fn(params, batch):
-        batch_size = next(iter(batch.values())).shape[0]
+    def inference_fn(params_obj: GraphParams, sharded_batch: Iterable[jnp.ndarray], randgen_key: jax.Array) -> GraphState:
+        batch_size_ = next(iter(sharded_batch.values())).shape[0]
         clamps = {}
         for task_name, task_value in batch.items():
             if task_name in structure.task_map and task_name == "x":
@@ -340,9 +370,9 @@ def evaluate_pcn_multi_gpu(
         # Use provided config or default
         init_config = state_init_config if state_init_config is not None else get_default_state_init()
         state = initialize_state(
-            structure, batch_size, clamps=clamps, state_init_config=init_config, params=params
+            structure, batch_size_, randgen_key, clamps=clamps, state_init_config=init_config, params=params_obj
         )
-        final_state = run_inference(params, state, clamps, structure, infer_steps, eta_infer)
+        final_state = run_inference(params_obj, state, clamps, structure, infer_steps, eta_infer)
         return final_state
 
     pmap_inference = jax.pmap(inference_fn, axis_name="devices")
@@ -351,7 +381,8 @@ def evaluate_pcn_multi_gpu(
     total_correct = 0
     total_samples = 0
 
-    for batch_data in test_loader:
+    for batch_idx, batch_data in enumerate(test_loader):
+        batch_key_for_step = batch_keys_per_device[:, batch_idx]
         # Convert batch
         if isinstance(batch_data, (list, tuple)):
             batch = {"x": jnp.array(batch_data[0]), "y": jnp.array(batch_data[1])}
@@ -368,7 +399,7 @@ def evaluate_pcn_multi_gpu(
         batch_sharded = shard_batch(batch, n_devices)
 
         # Run inference
-        final_states = pmap_inference(params, batch_sharded)
+        final_states = pmap_inference(params, batch_sharded, batch_key_for_step)
 
         # Gather results from all devices
         # (We need to reshape back from (n_devices, batch_per_device, ...) to (batch_size, ...))

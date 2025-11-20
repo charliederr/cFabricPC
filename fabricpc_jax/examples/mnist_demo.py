@@ -23,10 +23,16 @@ import time
 
 from fabricpc_jax.models import create_pc_graph
 from fabricpc_jax.training import train_pcn, evaluate_pcn
+from fabricpc_jax.training.data_utils import OneHotWrapper
 
 # Set random seed for reproducibility
-jax.config.update('jax_default_prng_impl', 'rbg')
+jax.config.update('jax_default_prng_impl', 'threefry2x32')  # 'rbg' is faster than 'threefry2x32', but less reproducible across vmap
 master_rng_key = jax.random.PRNGKey(0)
+import torch
+import numpy as np
+# Set seeds for torch data loaders
+torch.manual_seed(0)
+np.random.seed(0)
 
 # Split keys for different stages
 graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
@@ -78,10 +84,6 @@ print(f"Total parameters: {sum(p.size for p in jax.tree_util.tree_leaves(params)
 # LOAD DATA
 # ==============================================================================
 
-def one_hot(labels, num_classes=10):
-    """Convert labels to one-hot encoding."""
-    return jnp.eye(num_classes)[labels]
-
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.1307,), (0.3081,)),
@@ -93,19 +95,6 @@ test_data = datasets.MNIST('./data', train=False, download=True, transform=trans
 
 train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=16)
 test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=16)
-
-# Wrap loaders to provide one-hot labels
-class OneHotWrapper:
-    def __init__(self, loader):
-        self.loader = loader
-
-    def __iter__(self):
-        for x, y in self.loader:
-            y_onehot = one_hot(y.numpy(), num_classes=10)
-            yield x, y_onehot
-
-    def __len__(self):
-        return len(self.loader)
 
 train_loader = OneHotWrapper(train_loader)
 test_loader = OneHotWrapper(test_loader)

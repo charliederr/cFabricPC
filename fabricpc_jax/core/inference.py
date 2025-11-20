@@ -104,7 +104,7 @@ def compute_latent_gradients(
         # Replace the latent gradient in state
         state = update_node_in_state(state, node_name, latent_grad=grad)
 
-    # Backpropagate errors to pre-synaptic nodes through Jacobians
+    # Backpropagate errors to pre-synaptic nodes through Jacobian
     for node_name, node_info in structure.nodes.items():
         node_state = state.nodes[node_name]
         node_class = get_node_class_from_type(node_info.node_type)
@@ -155,13 +155,10 @@ def compute_all_projections(
 
     # Use node_order for efficient traversal
     for node_name in structure.node_order:
-        node_state = state.nodes[node_name]
-
         # Compute prediction for this node
         z_mu, pre_activation, substructure_state = compute_node_projection(
             params, state, node_name, structure
         )
-
         # Update the state with new predictions
         state = update_node_in_state(state, node_name, z_mu=z_mu, pre_activation=pre_activation, substructure=substructure_state)
 
@@ -179,14 +176,10 @@ def compute_errors(
         structure: Graph structure
 
     Returns:
-        Updated graph state with errors and gain-modulated errors
+        Updated graph state with errors, gain-modulated errors, and energy
     """
 
     for node_name in structure.nodes:
-        error = None
-        gain_mod_error = None
-        energy = None
-
         node_info = structure.nodes[node_name]
         node_state = state.nodes[node_name]
 

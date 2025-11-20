@@ -25,7 +25,7 @@ from fabricpc_jax import core, models, nodes, training
 from fabricpc_jax.core import types, activations, inference, initialization
 from fabricpc_jax.models import graph_net
 from fabricpc_jax.nodes import base, linear
-from fabricpc_jax.training import train_v2, optimizers, multi_gpu
+from fabricpc_jax.training import train, optimizers, multi_gpu
 
 __all__ = [
     "core",
@@ -34,12 +34,12 @@ __all__ = [
     "training",
     "types",
     "activations",
-    "inference.py",
+    "inference",
     "initialization",
-    "graph_net.py",
+    "graph_net",
     "base",
     "linear",
-    "train_v2",
+    "train",
     "optimizers",
     "multi_gpu",
 ]

@@ -190,7 +190,7 @@ def parse_state_init_config(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]
     init_type = config.get("type", "feedforward").lower()
 
     if init_type == "zeros":
-        return "zeros", None
+        return "zeros", {}
 
     elif init_type == "uniform":
         return "uniform", config

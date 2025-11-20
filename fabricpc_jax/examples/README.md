@@ -9,33 +9,35 @@ This directory contains example scripts demonstrating the JAX implementation of 
 export PYTHONPATH=/home/mrb/Projects/PC-Continual-Learning:$PYTHONPATH
 
 # Run MNIST demo
-python examples_jax/mnist_minimal.py
+python examples/mnist_demo.py
 ```
 
 ## Examples
 
-### `mnist_minimal.py`
+### `mnist_demo.py`
 
-**Description**: Minimal MNIST classification example demonstrating the basic JAX PC workflow.
+**Description**: MNIST classification example demonstrating the basic JAX PC workflow.
 
 **Architecture**:
 - Input layer: 784 units (28x28 flattened images)
-- Hidden layer: 256 units (sigmoid activation)
+- Hidden layer 1: 256 units (sigmoid activation)
+- Hidden layer 2: 64 units (sigmoid activation)
 - Output layer: 10 units (class logits)
 
 **Configuration**:
 - Optimizer: Adam (lr=1e-3)
-- Inference: 20 steps @ eta=0.1
-- Training: 5 epochs, batch size 128
+- Inference: 20 steps @ eta=0.05
+- Training: 20 epochs, batch size 200
 
 **Expected Results**:
 ```
-Epoch 1/5, Loss: 0.1090
-Epoch 2/5, Loss: 0.0447
-Epoch 3/5, Loss: 0.0295
-Epoch 4/5, Loss: 0.0222
-Epoch 5/5, Loss: 0.0176
-Test Accuracy: ~95-96%
+Epoch 1/20, Loss: 0.9054
+Epoch 2/20, Loss: 0.3796
+Epoch 3/20, Loss: 0.1513
+Epoch 4/20, Loss: 0.0964
+...
+Epoch 20/20, Loss: 0.0087
+Test Accuracy: 97.96%
 ```
 
 **Features Demonstrated**:
@@ -47,11 +49,8 @@ Test Accuracy: ~95-96%
 
 ## Coming Soon
 
-- Multi-GPU MNIST example using `pmap`
-- Continual learning examples
 - Deeper architectures
-- Custom loss functions
-- Advanced training techniques
+- Custom energy functional and non-Gaussian likelihoods
 
 ## Notes
 
@@ -80,6 +79,3 @@ export PYTHONPATH=/home/mrb/Projects/PC-Continual-Learning:$PYTHONPATH
 
 **Slow Training**: First epoch is slow due to JIT compilation. This is expected.
 
-## API Reference
-
-See the main documentation at `../JAX_MIGRATION.md` for detailed API information.

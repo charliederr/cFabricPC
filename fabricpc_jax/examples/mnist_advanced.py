@@ -20,10 +20,17 @@ import time
 
 from fabricpc_jax.models import create_pc_graph
 from fabricpc_jax.training import train_step, create_optimizer, evaluate_pcn
+from fabricpc_jax.training.data_utils import OneHotWrapper
 
 # Set random seed and split for different stages
+jax.config.update('jax_default_prng_impl', 'threefry2x32')  # 'rbg' is faster than 'threefry2x32', but less reproducible across vmaps
 master_rng_key = jax.random.PRNGKey(42)
 graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
+import torch
+import numpy as np
+# Set seeds for torch data loaders
+torch.manual_seed(0)
+np.random.seed(0)
 
 # ==============================================================================
 # ADVANCED NETWORK CONFIGURATION
@@ -60,28 +67,6 @@ batch_size = 200
 num_epochs = 10
 
 # fmt: on
-# ==============================================================================
-# HELPER FUNCTIONS
-# ==============================================================================
-
-def one_hot(labels, num_classes=10):
-    """Convert labels to one-hot encoding."""
-    return jnp.eye(num_classes)[labels]
-
-class OneHotWrapper:
-    """Wrap DataLoader to provide one-hot labels."""
-    def __init__(self, loader):
-        self.loader = loader
-        self.dataset = loader.dataset
-
-    def __iter__(self):
-        for x, y in self.loader:
-            y_onehot = one_hot(y.numpy(), num_classes=10)
-            yield x, y_onehot
-
-    def __len__(self):
-        return len(self.loader)
-
 # ==============================================================================
 # CREATE MODEL
 # ==============================================================================
@@ -161,11 +146,9 @@ training_history = []
 
 # Prepare keys for all epochs and batches
 num_batches = len(train_loader)
-all_rng_keys = []
-for epoch in range(num_epochs):
-    epoch_rng_key, train_key = jax.random.split(train_key)
-    batch_keys = jax.random.split(epoch_rng_key, num_batches)
-    all_rng_keys.append(batch_keys)
+# split keys into (num_epochs x num_batches)
+all_rng_keys = jax.random.split(train_key, num_epochs * num_batches)
+all_rng_keys = all_rng_keys.reshape((num_epochs, num_batches, 2))
 
 for epoch in range(num_epochs):
     epoch_start = time.time()
@@ -175,12 +158,13 @@ for epoch in range(num_epochs):
         batch = {"x": jnp.array(x), "y": y}
 
         # Training step with unique rng_key
-        params, opt_state, loss, _ = jit_train_step(params, opt_state, batch, all_rng_keys[epoch][batch_idx])
+        params, opt_state, loss, _ = jit_train_step(params, opt_state, batch, all_rng_keys[epoch, batch_idx])
         epoch_losses.append(float(loss))
 
-        # Progress indicator every 100 batches
-        if (batch_idx + 1) % 100 == 0:
-            avg_loss = sum(epoch_losses[-100:]) / len(epoch_losses[-100:])
+        # Progress indicator every n_batch_update batches
+        n_batch_update = 100
+        if (batch_idx + 1) % n_batch_update == 0:
+            avg_loss = sum(epoch_losses[-n_batch_update:]) / len(epoch_losses[-n_batch_update:])
             print(f"  Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {avg_loss:.4f}")
 
     epoch_time = time.time() - epoch_start
@@ -189,7 +173,7 @@ for epoch in range(num_epochs):
     # Evaluate on test set with unique eval key for this epoch
     epoch_eval_key, eval_key = jax.random.split(eval_key)
     metrics = evaluate_pcn(params, structure, test_loader, train_config, epoch_eval_key)
-    accuracy = metrics['accuracy'] * 100
+    accuracy = metrics['accuracy'] * 100  # convert to percentage
 
     # Track best model
     if accuracy > best_accuracy:

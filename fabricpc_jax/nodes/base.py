@@ -7,7 +7,7 @@ All node methods are pure functions (no side effects) for JAX compatibility.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Tuple, Type, Optional, NamedTuple
+from typing import Dict, Any, Tuple
 import jax
 import jax.numpy as jnp
 from dataclasses import dataclass
@@ -157,7 +157,6 @@ class NodeBase(ABC):
             return z_mu
 
         jacobian = jax.jacobian(output_fn)(inputs[edge_key])
-        print(f"jaxrev jacobia shape {jacobian.shape} input shape {inputs[edge_key].shape} output shape {node_state.z_latent.shape}")
         # jacobian has shape (output_dim, batch_size, input_dim, batch_size)
         return jacobian
 
@@ -182,6 +181,7 @@ class NodeBase(ABC):
             inputs: Dictionary mapping edge key to input tensors
             node_state: Current node state (contains errors, pre-activations, etc.)
             node_info: Node configuration
+            structure: GraphStructure object (contains graph topology)
 
         Returns:
             Dictionary mapping node names to latent gradient contributions
@@ -229,7 +229,7 @@ class NodeBase(ABC):
                 # s: source dimension
 
             else:
-                raise ValueError(f"Invalid Jacobian shape {jacobian.shape} for edge {edge_key}")
+                raise ValueError(f"invalid Jacobian shape {jacobian.shape} for edge {edge_key}")
 
             # Apply the contributions from projections of target nodes
             # ∂E_b /∂z_this = error_this - Σ_targets(error_target · J_target←this)
@@ -267,7 +267,6 @@ class NodeBase(ABC):
     def get_energy_functional(energy_name: str) -> Tuple[Any, Any, Any]:
         """
         Retrieve the energy functional by name.
-        Nodes can override this to provide custom energy functionals optimized for their structure
         Args:
             energy_name: Name of the energy functional (e.g., "gaussian", "bernoulli")
         Returns:

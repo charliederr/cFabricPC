@@ -5,7 +5,7 @@ This module implements training with local gradient computation for each node,
 as required for true predictive coding with local learning rules.
 """
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, cast
 import jax
 import jax.numpy as jnp
 import optax
@@ -25,7 +25,7 @@ def compute_local_weight_gradients(
     Compute local weight gradients for each node using its own error signal.
 
     This implements the local Hebbian learning rule for predictive coding:
-    - Weight gradient: - (input.T @ gain_mod_error)
+    - Weight gradient: -(input.T @ gain_mod_error)
     - Bias gradient: -sum(gain_mod_error)
 
     Args:
@@ -122,7 +122,7 @@ def train_step(
     energy = 0.0
     for node_name, node_info in structure.nodes.items():
         if node_info.in_degree > 0:  # Skip source nodes
-            energy += jnp.sum(final_state.nodes[node_name].error ** 2)
+            energy += final_state.nodes[node_name].energy
 
     # Average over batch
     loss = energy / batch_size
@@ -132,7 +132,8 @@ def train_step(
 
     # Update parameters using optimizer
     updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
+    params = cast(GraphParams, optax.apply_updates(params, updates))
+    # Note: optax.apply_updates preserves the structure but loses type info
 
     return params, opt_state, loss, final_state
 
@@ -219,7 +220,7 @@ def train_pcn(
                 # Already a dictionary
                 batch = {k: jnp.array(v) for k, v in batch_data.items()}
             else:
-                raise ValueError(f"Unsupported batch format: {type(batch_data)}")
+                raise ValueError(f"unsupported batch format: {type(batch_data)}")
 
             # Training step with unique rng_key for this batch
             params, opt_state, loss, _ = jit_train_step(params, opt_state, batch, batch_keys[batch_idx])
@@ -306,7 +307,7 @@ def evaluate_pcn(
         energy = 0.0
         for node_name, node_info in structure.nodes.items():
             if node_info.in_degree > 0:
-                energy += jnp.sum(final_state.nodes[node_name].error ** 2)
+                energy += final_state.nodes[node_name].energy
         energy = energy / batch_size
         total_loss += float(energy) * batch_size
 

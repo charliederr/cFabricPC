@@ -38,7 +38,7 @@ def create_optimizer(config: dict) -> optax.GradientTransformation:
         momentum = config.get("momentum", 0.0)
         optimizer = optax.sgd(lr, momentum=momentum)
     else:
-        raise ValueError(f"Unknown optimizer type: {opt_type}")
+        raise ValueError(f"unknown optimizer type: {opt_type}")
 
     # Add weight decay if not using AdamW (which has built-in weight decay)
     if opt_type != "adamw" and weight_decay > 0:

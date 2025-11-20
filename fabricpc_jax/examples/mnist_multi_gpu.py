@@ -22,9 +22,16 @@ import time
 
 from fabricpc_jax.models import create_pc_graph
 from fabricpc_jax.training import train_pcn_multi_gpu, evaluate_pcn_multi_gpu
+from fabricpc_jax.training.data_utils import OneHotWrapper
 
 # Set random seed
-key = jax.random.PRNGKey(42)
+master_rng_key = jax.random.PRNGKey(42)
+graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
+import torch
+import numpy as np
+# Set seeds for torch data loaders
+torch.manual_seed(0)
+np.random.seed(0)
 
 # ==============================================================================
 # CONFIGURATION
@@ -35,7 +42,7 @@ config = {
     "node_list": [
         {"name": "pixels", "dim": 784, "type": "linear", "activation": {"type": "identity"}},
         {"name": "h1",     "dim": 256, "type": "linear", "activation": {"type": "relu"}},
-        {"name": "h2",     "dim": 128, "type": "linear", "activation": {"type": "relu"}},
+        {"name": "h2",     "dim": 64, "type": "linear", "activation": {"type": "relu"}},
         {"name": "class",  "dim": 10, "type": "linear",  "activation": {"type": "identity"}},
     ],
 
@@ -49,13 +56,10 @@ config = {
 }
 
 train_config = {
-    "num_epochs": 10,
+    "num_epochs": 20,
     "infer_steps": 20,
     "eta_infer": 0.05,
-    "optimizer": {
-        "type": "adam",
-        "lr": 0.001,
-    },
+    "optimizer": {"type": "adam", "lr": 0.001, "weight_decay": 0.001},
 }
 
 # fmt: on
@@ -87,8 +91,7 @@ else:
 # ==============================================================================
 
 print(f"\n[Model Architecture]")
-weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.05}
-params, structure = create_pc_graph(config, key, weight_init_config)
+params, structure = create_pc_graph(config, graph_key)
 num_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
 
 print(f"  Nodes: {len(config['node_list'])}")
@@ -101,9 +104,6 @@ print(f"  Parameters: {num_params:,}")
 
 print(f"\n[Data Loading]")
 
-def one_hot(labels, num_classes=10):
-    return jnp.eye(num_classes)[labels]
-
 transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Lambda(lambda x: x.view(-1)),
@@ -113,7 +113,7 @@ train_data = datasets.MNIST('./data', train=True, download=True, transform=trans
 test_data = datasets.MNIST('./data', train=False, download=True, transform=transform)
 
 # Important: Batch size should be divisible by number of devices!
-batch_size = 128 * n_devices  # Scale batch size with number of devices
+batch_size = 200 * n_devices  # Scale batch size with number of devices
 print(f"  Batch size: {batch_size} ({batch_size // n_devices} per device)")
 
 train_loader = DataLoader(
@@ -122,20 +122,6 @@ train_loader = DataLoader(
 test_loader = DataLoader(
     test_data, batch_size=batch_size, shuffle=False, num_workers=4, drop_last=True
 )
-
-# Wrap loaders for one-hot encoding
-class OneHotWrapper:
-    def __init__(self, loader):
-        self.loader = loader
-        self.dataset = loader.dataset
-
-    def __iter__(self):
-        for x, y in self.loader:
-            y_onehot = one_hot(y.numpy(), num_classes=10)
-            yield x, y_onehot
-
-    def __len__(self):
-        return len(self.loader)
 
 train_loader = OneHotWrapper(train_loader)
 test_loader = OneHotWrapper(test_loader)
@@ -162,6 +148,7 @@ trained_params = train_pcn_multi_gpu(
     structure=structure,
     train_loader=train_loader,
     config=train_config,
+    rng_key=train_key,
     verbose=True,
 )
 training_time = time.time() - start_time
@@ -175,7 +162,7 @@ print(f"  Throughput: {len(train_loader.dataset) * train_config['num_epochs'] / 
 # ==============================================================================
 
 print(f"\n[Evaluation]")
-metrics = evaluate_pcn_multi_gpu(trained_params, structure, test_loader, train_config)
+metrics = evaluate_pcn_multi_gpu(trained_params, structure, test_loader, train_config, eval_key)
 print(f"  Test Accuracy: {metrics['accuracy'] * 100:.2f}%")
 
 # ==============================================================================

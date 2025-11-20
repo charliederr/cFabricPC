@@ -337,4 +337,4 @@ def create_node_from_config(config: dict):
     if type == "linear":
         return LinearPCNode(config)
     else:
-        raise ValueError(f"Unknown node type '{type}'. Supported: 'linear'.")
+        raise ValueError(f"unknown node type '{type}'. Supported: 'linear'.")
