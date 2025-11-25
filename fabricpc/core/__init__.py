@@ -1,7 +1,7 @@
 """Core JAX predictive coding components."""
 
 # Type definitions
-from fabricpc_jax.core.types import (
+from fabricpc.core.types import (
     GraphParams,
     GraphState,
     GraphStructure,
@@ -11,7 +11,7 @@ from fabricpc_jax.core.types import (
 )
 
 # Activation functions
-from fabricpc_jax.core.activations import (
+from fabricpc.core.activations import (
     get_activation,
     get_activation_fn,
     get_activation_deriv,
@@ -31,7 +31,7 @@ from fabricpc_jax.core.activations import (
 )
 
 # Inference functions
-from fabricpc_jax.core.inference import (
+from fabricpc.core.inference import (
     compute_node_projection,
     compute_latent_gradients,
     compute_all_projections,
@@ -41,7 +41,7 @@ from fabricpc_jax.core.inference import (
 )
 
 # Initialization utilities
-from fabricpc_jax.core.initialization import (
+from fabricpc.core.initialization import (
     initialize_weights,
     initialize_state_values,
     parse_state_init_config,

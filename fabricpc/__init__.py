@@ -12,8 +12,8 @@ Key Features:
 - XLA optimization for maximum performance
 
 Example:
-    >>> from fabricpc_jax.models import create_pc_graph
-    >>> from fabricpc_jax.training import train_pcn
+    >>> from fabricpc.models import create_pc_graph
+    >>> from fabricpc.training import train_pcn
     >>>
     >>> params, structure = create_pc_graph(config)
     >>> params = train_pcn(params, structure, train_loader, config)
@@ -21,11 +21,11 @@ Example:
 
 __version__ = "0.2.0"
 
-from fabricpc_jax import core, models, nodes, training
-from fabricpc_jax.core import types, activations, inference, initialization
-from fabricpc_jax.models import graph_net
-from fabricpc_jax.nodes import base, linear
-from fabricpc_jax.training import train, optimizers, multi_gpu
+from fabricpc import core, models, nodes, training
+from fabricpc.core import types, activations, inference, initialization
+from fabricpc.models import graph_net
+from fabricpc.nodes import base, linear
+from fabricpc.training import train, optimizers, multi_gpu
 
 __all__ = [
     "core",

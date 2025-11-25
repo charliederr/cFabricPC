@@ -18,9 +18,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
 
-from fabricpc_jax.models import create_pc_graph
-from fabricpc_jax.training import train_step, create_optimizer, evaluate_pcn
-from fabricpc_jax.training.data_utils import OneHotWrapper
+from fabricpc.models import create_pc_graph
+from fabricpc.training import train_step, create_optimizer, evaluate_pcn
+from fabricpc.training.data_utils import OneHotWrapper
 
 # Set random seed and split for different stages
 jax.config.update('jax_default_prng_impl', 'threefry2x32')  # 'rbg' is faster than 'threefry2x32', but less reproducible across vmaps

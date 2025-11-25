@@ -10,10 +10,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc_jax.core.inference import run_inference, gather_inputs
-from fabricpc_jax.nodes import get_node_class_from_type
-from fabricpc_jax.core.types import NodeParams
+from fabricpc.core.types import GraphParams, GraphState, GraphStructure
+from fabricpc.core.inference import run_inference, gather_inputs
+from fabricpc.nodes import get_node_class_from_type
+from fabricpc.core.types import NodeParams
 
 
 def compute_local_weight_gradients(
@@ -97,7 +97,7 @@ def train_step(
     Returns:
         Tuple of (updated_params, updated_opt_state, loss, final_state)
     """
-    from fabricpc_jax.models.graph_net import initialize_state
+    from fabricpc.models.graph_net import initialize_state
 
     batch_size = next(iter(batch.values())).shape[0]
 
@@ -180,7 +180,7 @@ def train_pcn(
         ... }
         >>> trained_params = train_pcn(params, structure, train_loader, train_config, train_key)
     """
-    from fabricpc_jax.training.optimizers import create_optimizer
+    from fabricpc.training.optimizers import create_optimizer
 
     # Create optimizer
     optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))
@@ -272,7 +272,7 @@ def evaluate_pcn(
     Returns:
         Dictionary of evaluation metrics (e.g., accuracy, loss)
     """
-    from fabricpc_jax.models.graph_net import initialize_state
+    from fabricpc.models.graph_net import initialize_state
 
     infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)

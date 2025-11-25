@@ -9,11 +9,11 @@ from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 
-from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc_jax.core.activations import get_activation
-from fabricpc_jax.nodes import get_node_class_from_type
-from fabricpc_jax.core.types import NodeParams, NodeInfo
-from fabricpc_jax.utils.helpers import update_node_in_state
+from fabricpc.core.types import GraphParams, GraphState, GraphStructure
+from fabricpc.core.activations import get_activation
+from fabricpc.nodes import get_node_class_from_type
+from fabricpc.core.types import NodeParams, NodeInfo
+from fabricpc.utils.helpers import update_node_in_state
 
 
 def gather_inputs(

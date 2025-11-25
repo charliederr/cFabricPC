@@ -20,12 +20,12 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from fabricpc_jax.core.types import NodeState, NodeParams, GraphState
-from fabricpc_jax.models.graph_net import create_pc_graph, build_graph_structure, initialize_state
-from fabricpc_jax.core.inference import run_inference
-from fabricpc_jax.training import train_step, compute_local_weight_gradients
-from fabricpc_jax.training.optimizers import create_optimizer
-from fabricpc_jax.nodes import get_node_class_from_type
+from fabricpc.core.types import NodeState, NodeParams, GraphState
+from fabricpc.models.graph_net import create_pc_graph, build_graph_structure, initialize_state
+from fabricpc.core.inference import run_inference
+from fabricpc.training import train_step, compute_local_weight_gradients
+from fabricpc.training.optimizers import create_optimizer
+from fabricpc.nodes import get_node_class_from_type
 
 # Set up JAX
 jax.config.update("jax_platform_name", "cpu")

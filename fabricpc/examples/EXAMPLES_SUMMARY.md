@@ -50,13 +50,13 @@ Created comprehensive examples matching the PyTorch version's simplicity while s
 
 ### 4. `__init__.py`
 - Makes examples a proper Python module
-- Enables `python -m fabricpc_jax.examples.mnist_demo`
+- Enables `python -m fabricpc.examples.mnist_demo`
 
 ## Testing Results
 
 ### `mnist_demo.py`
 ```bash
-$ python -m fabricpc_jax.examples.mnist_demo
+$ python -m fabricpc.examples.mnist_demo
 
 Model created: 3 nodes, 2 edges
 Total parameters: 102,554
@@ -76,7 +76,7 @@ Test Loss: 0.0000
 
 ### `mnist_advanced.py`
 ```bash
-$ python -m fabricpc_jax.examples.mnist_advanced
+$ python -m fabricpc.examples.mnist_advanced
 
 [Model Architecture]
   Nodes: 5
@@ -119,7 +119,7 @@ $ python -m fabricpc_jax.examples.mnist_advanced
 ### Quick Start
 ```python
 # Just run the minimal demo
-python -m fabricpc_jax.examples.mnist_demo
+python -m fabricpc.examples.mnist_demo
 ```
 
 ### Custom Architecture

@@ -20,9 +20,9 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
 
-from fabricpc_jax.models import create_pc_graph
-from fabricpc_jax.training import train_pcn_multi_gpu, evaluate_pcn_multi_gpu
-from fabricpc_jax.training.data_utils import OneHotWrapper
+from fabricpc.models import create_pc_graph
+from fabricpc.training import train_pcn_multi_gpu, evaluate_pcn_multi_gpu
+from fabricpc.training.data_utils import OneHotWrapper
 
 # Set random seed
 master_rng_key = jax.random.PRNGKey(42)

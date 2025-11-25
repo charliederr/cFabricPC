@@ -11,7 +11,7 @@ from typing import Dict, Any, Tuple
 import jax
 import jax.numpy as jnp
 from dataclasses import dataclass
-from fabricpc_jax.core.types import NodeParams, NodeState, NodeInfo, GraphStructure
+from fabricpc.core.types import NodeParams, NodeState, NodeInfo, GraphStructure
 
 @dataclass(frozen=True)
 class SlotSpec:
@@ -145,7 +145,7 @@ class NodeBase(ABC):
             dictionary of Jacobian matrix of shape (input_dim, output_dim) for each edge key
         """
         # Get the concrete node class for this node type
-        from fabricpc_jax.nodes import get_node_class_from_type
+        from fabricpc.nodes import get_node_class_from_type
         node_class = get_node_class_from_type(node_info.node_type)
 
         # Default: use JAX autodiff

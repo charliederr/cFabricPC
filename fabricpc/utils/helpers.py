@@ -1,4 +1,4 @@
-from fabricpc_jax.core.types import GraphState
+from fabricpc.core.types import GraphState
 
 def update_node_in_state(
         state: GraphState,

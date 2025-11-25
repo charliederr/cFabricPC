@@ -24,9 +24,9 @@ from typing import Dict
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fabricpc.models.graph_net import PCGraphNet
-from fabricpc_jax.models import create_pc_graph
-from fabricpc_jax.core.inference import run_inference
-from fabricpc_jax.models.graph_net import initialize_state
+from fabricpc.models import create_pc_graph
+from fabricpc.core.inference import run_inference
+from fabricpc.models.graph_net import initialize_state
 
 
 def create_test_config():
@@ -58,7 +58,7 @@ def copy_weights_pytorch_to_jax(pt_net, jax_params, jax_structure):
     Returns:
         Updated JAX params with PyTorch weights
     """
-    from fabricpc_jax.core.types import GraphParams, NodeParams
+    from fabricpc.core.types import GraphParams, NodeParams
 
     new_nodes = {}
 
@@ -309,7 +309,7 @@ def test_gradient_computation():
     print("Note: Comparing manual gradients (PyTorch) vs manual gradients (JAX)")
 
     # Import the manual gradient computation function
-    from fabricpc_jax.training.train import compute_local_weight_gradients
+    from fabricpc.training.train import compute_local_weight_gradients
 
     config = create_test_config()
     batch_size = 4

@@ -2,12 +2,12 @@
 Node types for JAX predictive coding networks.
 """
 
-from fabricpc_jax.nodes.base import (
+from fabricpc.nodes.base import (
     SlotSpec,
     Slot,
     NodeBase,
 )
-from fabricpc_jax.nodes.linear import LinearNode
+from fabricpc.nodes.linear import LinearNode
 
 from typing import Type
 def get_node_class_from_type(node_type: str) -> Type[NodeBase]:

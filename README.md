@@ -9,5 +9,5 @@ FabricPC implements predictive coding networks using a clean abstraction of:
 
 ## Quick Start
 export PYTHONPATH=$PYTHONPATH:$(pwd)
-python experiments/mnist/demo_minimal.py
+python fabricpc/examples/mnist_demo.py
 

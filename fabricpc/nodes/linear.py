@@ -9,10 +9,10 @@ from typing import Dict, Any, Tuple
 import jax
 import jax.numpy as jnp
 
-from fabricpc_jax.nodes.base import NodeBase, SlotSpec
-from fabricpc_jax.core.types import NodeParams, NodeState, NodeInfo, GraphStructure
-from fabricpc_jax.core.activations import get_activation
-from fabricpc_jax.core.initialization import initialize_weights
+from fabricpc.nodes.base import NodeBase, SlotSpec
+from fabricpc.core.types import NodeParams, NodeState, NodeInfo, GraphStructure
+from fabricpc.core.activations import get_activation
+from fabricpc.core.initialization import initialize_weights
 
 
 class LinearNode(NodeBase):

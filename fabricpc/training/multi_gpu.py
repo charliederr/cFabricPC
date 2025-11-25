@@ -10,10 +10,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from fabricpc_jax.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc_jax.core.inference import run_inference
-from fabricpc_jax.models.graph_net import initialize_state
-from fabricpc_jax.core.initialization import get_default_state_init
+from fabricpc.core.types import GraphParams, GraphState, GraphStructure
+from fabricpc.core.inference import run_inference
+from fabricpc.models.graph_net import initialize_state
+from fabricpc.core.initialization import get_default_state_init
 
 
 def replicate_params(params: GraphParams, n_devices: int) -> GraphParams:
@@ -225,7 +225,7 @@ def train_pcn_multi_gpu(
         >>> params, structure = create_pc_graph(config, jax.random.PRNGKey(0))
         >>> trained = train_pcn_multi_gpu(params, structure, train_loader, config)
     """
-    from fabricpc_jax.training.optimizers import create_optimizer
+    from fabricpc.training.optimizers import create_optimizer
 
     # Get available devices
     n_devices = jax.device_count()
@@ -235,7 +235,7 @@ def train_pcn_multi_gpu(
     if n_devices == 1:
         if verbose:
             print("Only 1 device available, falling back to single-GPU training")
-        from fabricpc_jax.training import train_pcn
+        from fabricpc.training import train_pcn
         return train_pcn(params, structure, train_loader, config, rng_key, verbose)
 
     # Create optimizer
@@ -337,7 +337,7 @@ def evaluate_pcn_multi_gpu(
     n_devices = jax.device_count()
 
     if n_devices == 1:
-        from fabricpc_jax.training import evaluate_pcn
+        from fabricpc.training import evaluate_pcn
         return evaluate_pcn(params, structure, test_loader, config, rng_key)
 
     # Split keys for devices

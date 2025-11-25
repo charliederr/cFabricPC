@@ -22,10 +22,10 @@ from torchvision import datasets, transforms
 import time
 import os
 
-from fabricpc_jax.models import create_pc_graph
-from fabricpc_jax.training import train_pcn, evaluate_pcn
-from fabricpc_jax.training.data_utils import OneHotWrapper
-from fabricpc_jax.examples.plotting.visualize_experiment import plot_energy_history_interactive
+from fabricpc.models import create_pc_graph
+from fabricpc.training import train_pcn, evaluate_pcn
+from fabricpc.training.data_utils import OneHotWrapper
+from fabricpc.examples.plotting.visualize_experiment import plot_energy_history_interactive
 
 os.environ["JAX_PLATFORMS"] = "cuda"  # change to "cpu", "cuda" or "tpu" if available
 
