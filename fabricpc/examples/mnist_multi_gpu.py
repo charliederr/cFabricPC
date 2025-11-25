@@ -1,5 +1,5 @@
 """
-Multi-GPU MNIST Example (JAX)
+Multi-GPU MNIST Example
 ==============================
 
 This example demonstrates data-parallel training across multiple GPUs using pmap.
@@ -15,7 +15,6 @@ come with 2+ GPUs.
 """
 
 import jax
-import jax.numpy as jnp
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
@@ -68,7 +67,7 @@ train_config = {
 # ==============================================================================
 
 print("="*70)
-print("JAX Multi-GPU Predictive Coding - MNIST")
+print("Multi-GPU Predictive Coding - MNIST")
 print("="*70)
 
 n_devices = jax.device_count()

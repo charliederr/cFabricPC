@@ -1,14 +1,12 @@
-# JAX Predictive Coding Examples
+# Predictive Coding Examples
 
-This directory contains example scripts demonstrating the JAX implementation of FabricPC.
+This directory contains example scripts demonstrating FabricPC.
 
 ## Quick Start
 
 ```bash
-# Set PYTHONPATH
-export PYTHONPATH=/home/mrb/Projects/PC-Continual-Learning:$PYTHONPATH
-
 # Run MNIST demo
+export PYTHONPATH=$PYTHONPATH:$(pwd)
 python examples/mnist_demo.py
 ```
 
@@ -16,7 +14,7 @@ python examples/mnist_demo.py
 
 ### `mnist_demo.py`
 
-**Description**: MNIST classification example demonstrating the basic JAX PC workflow.
+**Description**: MNIST classification example demonstrating the basic PC workflow.
 
 **Architecture**:
 - Input layer: 784 units (28x28 flattened images)
@@ -69,13 +67,5 @@ This is harmless for now but will be addressed in future versions by switching t
 First batch will be slow due to JIT compilation (~5-10 seconds). Subsequent batches are fast.
 
 ## Troubleshooting
-
 **Import Error**: Make sure PYTHONPATH is set:
-```bash
-export PYTHONPATH=/home/mrb/Projects/PC-Continual-Learning:$PYTHONPATH
-```
-
-**CUDA Out of Memory**: Reduce batch size in the script.
-
-**Slow Training**: First epoch is slow due to JIT compilation. This is expected.
 

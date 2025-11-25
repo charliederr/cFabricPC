@@ -1,15 +1,14 @@
 """
-ADVANCED Predictive Coding Network Example (JAX)
+ADVANCED Predictive Coding Network Example
 =================================================
 
 This example demonstrates:
 1. Deeper network architectures
-2. Different activation functions
-3. Custom training configurations
-4. Progress monitoring and checkpointing
-5. Hyperparameter exploration
+2. Custom training configurations
+3. Progress monitoring and checkpointing
+4. Hyperparameter exploration
 
-Compared to mnist_demo.py, this shows more realistic training scenarios.
+Compared to mnist_demo.py, this shows a customizable training loop
 """
 
 import jax
@@ -72,7 +71,7 @@ num_epochs = 10
 # ==============================================================================
 
 print("="*70)
-print("JAX Predictive Coding - Advanced MNIST Example")
+print("Predictive Coding - Advanced MNIST Example")
 print("="*70)
 
 params, structure = create_pc_graph(config, graph_key)
@@ -209,13 +208,10 @@ for h in training_history:
 print("\n" + "="*70)
 print("Advanced Training Complete!")
 print("\nKey takeaways:")
-print("  ✓ Deeper networks (4 hidden layers) work great")
-print("  ✓ Different activations (ReLU) converge well")
 print("  ✓ JIT compilation makes training fast")
 print("  ✓ Monitoring and checkpointing are easy")
 print("\nNext steps:")
 print("  - Try even deeper architectures")
 print("  - Experiment with different optimizers")
 print("  - Add learning rate scheduling")
-print("  - Implement multi-GPU training with pmap")
 print("="*70)

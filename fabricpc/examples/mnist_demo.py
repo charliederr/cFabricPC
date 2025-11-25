@@ -1,22 +1,16 @@
 """
-MINIMAL Predictive Coding Network Example (JAX)
+MINIMAL Predictive Coding Network Example
 ================================================
 
 This is the absolute SIMPLEST example showing how to:
 1. Define a network with a dictionary
-2. Train it on MNIST with JAX
+2. Train it on MNIST
 3. Get results
 
 Total code: ~60 lines. That's it!
-
-Key differences from PyTorch version:
-- Functional programming (immutable params)
-- Automatic JIT compilation for speed
-- Multi-GPU ready (just add pmap!)
 """
 
 import jax
-import jax.numpy as jnp
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import time
@@ -25,7 +19,6 @@ import os
 from fabricpc.graph import create_pc_graph
 from fabricpc.training import train_pcn, evaluate_pcn
 from fabricpc.training.data_utils import OneHotWrapper
-from fabricpc.examples.plotting.visualize_experiment import plot_energy_history_interactive
 
 os.environ["JAX_PLATFORMS"] = "cuda"  # change to "cpu", "cuda" or "tpu" if available
 
@@ -62,7 +55,7 @@ config = {
         {"source_name": "hidden2", "target_name": "class",   "slot": "in"},
     ],
 
-    # Map tasks to nodes
+    # Map data loader tasks to nodes
     "task_map": {"x": "pixels", "y": "class"},
 }
 

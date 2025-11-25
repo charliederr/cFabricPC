@@ -7,6 +7,8 @@ FabricPC implements predictive coding networks using a clean abstraction of:
 - **Wires**: Connections (edges) between nodes in the model architecture
 - **Updates**: Iterative inference and learning algorithms
 
+Uses JAX for GPU acceleration and local (node-level) automatic differentiation.
+
 ## Quick Start
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 python examples/mnist_demo.py
