@@ -181,6 +181,20 @@ class LinearNode(NodeBase):
         total_energy = jnp.sum(state.energy)
         return total_energy, state
 
+
+class LinearExplicitGrad(LinearNode):
+    """
+    Linear node that overrides NodeBase's autodiff-based gradient computation.
+
+    This class extends LinearNode to define explicit gradient computations
+    for both inference and learning phases. Use as an example of manual gradient.
+
+    Useful for:
+    - Verifying correctness of manual gradient implementations
+    - Prototyping optimized gradients
+    - Debugging gradient computation issues
+    """
+
     @staticmethod
     def forward_inference(
         params: NodeParams,
@@ -303,44 +317,33 @@ class LinearNode(NodeBase):
         return state, NodeParams(weights=weight_grads, biases=bias_grads)
 
 
-class LinearAutoGradNode(LinearNode):
-    """
-    Linear node that uses NodeBase's autodiff-based gradient computation.
 
-    This class extends LinearNode but delegates compute_gradient to the
-    base class implementation, which uses JAX automatic differentiation
-    via compute_jacobian_for_edge instead of the manual formula.
 
-    Useful for:
-    - Verifying correctness of manual gradient implementations
-    - Prototyping new node types before optimizing gradients
-    - Debugging gradient computation issues
-    """
-
-    @staticmethod
-    def forward_inference(
-        params: NodeParams,
-        inputs: Dict[str, jnp.ndarray],  # EdgeInfo.key -> inputs data
-        state: NodeState,  # state object for the present node
-        node_info: NodeInfo,
-    ) -> Tuple[NodeState, Dict[str, jnp.ndarray]]:
-        """
-        Forward pass: updates node state and computes gradients w.r.t. inputs.
-
-        Delegate to NodeBase's implementation which uses JAX autodiff.
-        """
-        return NodeBase.forward_inference(params, inputs, state, node_info)
-
-    @staticmethod
-    def forward_learning(
-        params: NodeParams,
-        inputs: Dict[str, jnp.ndarray],
-        state: NodeState,  # state object for the present node
-        node_info: NodeInfo
-    ) -> Tuple[NodeState, NodeParams]:
-        """
-        Forward pass: update state and compute gradients of weights for local learning.
-
-        Delegate to NodeBase's implementation which uses JAX autodiff.
-        """
-        return NodeBase.forward_learning(params, inputs, state, node_info)
+    #
+    # @staticmethod
+    # def forward_inference(
+    #     params: NodeParams,
+    #     inputs: Dict[str, jnp.ndarray],  # EdgeInfo.key -> inputs data
+    #     state: NodeState,  # state object for the present node
+    #     node_info: NodeInfo,
+    # ) -> Tuple[NodeState, Dict[str, jnp.ndarray]]:
+    #     """
+    #     Forward pass: updates node state and computes gradients w.r.t. inputs.
+    #
+    #     Delegate to NodeBase's implementation which uses JAX autodiff.
+    #     """
+    #     return NodeBase.forward_inference(params, inputs, state, node_info)
+    #
+    # @staticmethod
+    # def forward_learning(
+    #     params: NodeParams,
+    #     inputs: Dict[str, jnp.ndarray],
+    #     state: NodeState,  # state object for the present node
+    #     node_info: NodeInfo
+    # ) -> Tuple[NodeState, NodeParams]:
+    #     """
+    #     Forward pass: update state and compute gradients of weights for local learning.
+    #
+    #     Delegate to NodeBase's implementation which uses JAX autodiff.
+    #     """
+    #     return NodeBase.forward_learning(params, inputs, state, node_info)

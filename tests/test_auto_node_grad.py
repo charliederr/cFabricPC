@@ -1,7 +1,7 @@
 """
-Test suite for LinearAutoGradNode gradient computation.
+Test suite for LinearExplicitGrad gradient computation.
 
-Verifies that LinearAutoGradNode (using JAX autodiff) produces
+Verifies that LinearExplicitGrad (using JAX autodiff) produces
 numerically equivalent gradients to LinearNode (using manual formulas).
 """
 
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from fabricpc.core.types import NodeState, NodeParams, NodeInfo, EdgeInfo, GraphStructure
 from fabricpc.graph.graph_net import create_pc_graph, initialize_state
 from fabricpc.core.inference import run_inference, gather_inputs
-from fabricpc.nodes import get_node_class_from_type, LinearNode, LinearAutoGradNode
+from fabricpc.nodes import get_node_class_from_type, LinearNode, LinearExplicitGrad
 
 jax.config.update("jax_platform_name", "cpu")  # using cuda causes larger numerical differences because of TF32 precision
 
@@ -63,7 +63,7 @@ def create_config(node_type: str):
 
 
 class TestLinearAutoGradNode:
-    """Test that LinearAutoGradNode produces identical gradients to LinearNode."""
+    """Test that LinearExplicitGrad produces identical gradients to LinearNode."""
 
     @pytest.mark.parametrize("activation", ["identity", "relu", "tanh", "sigmoid"])
     def test_forward_inference_equivalence(self, rng_key, activation, grad_tolerance):
@@ -109,7 +109,7 @@ class TestLinearAutoGradNode:
 
         # Compare forward_inference results
         state_linear, grads_linear = LinearNode.forward_inference(params, inputs, node_state, node_info)
-        state_autograd, grads_autograd = LinearAutoGradNode.forward_inference(params, inputs, node_state, node_info)
+        state_autograd, grads_autograd = LinearExplicitGrad.forward_inference(params, inputs, node_state, node_info)
 
         # Compare input gradients
         for edge_key in grads_linear:
@@ -167,7 +167,7 @@ class TestLinearAutoGradNode:
 
         # Compare forward_learning results
         state_linear, grads_linear = LinearNode.forward_learning(params, inputs, node_state, node_info)
-        state_autograd, grads_autograd = LinearAutoGradNode.forward_learning(params, inputs, node_state, node_info)
+        state_autograd, grads_autograd = LinearExplicitGrad.forward_learning(params, inputs, node_state, node_info)
 
         # Compare weight gradients
         for edge_key in grads_linear.weights:
@@ -187,7 +187,7 @@ class TestLinearAutoGradNode:
 
         # Create two identical networks with different node types
         config_linear = create_config("linear")
-        config_autograd = create_config("linear_autograd")
+        config_autograd = create_config("linear_explicit_grad")
 
         # Use same key for identical initialization
         params_linear, structure_linear = create_pc_graph(config_linear, rng_key)
@@ -233,7 +233,7 @@ class TestLinearAutoGradNode:
                 state_linear.nodes[node_name],
                 node_info
             )
-            _, grads_autograd = LinearAutoGradNode.forward_inference(
+            _, grads_autograd = LinearExplicitGrad.forward_inference(
                 params_autograd.nodes[node_name],
                 inputs,
                 state_autograd.nodes[node_name],
@@ -248,17 +248,17 @@ class TestLinearAutoGradNode:
 
 
 class TestLinearAutoGradNodeRegistration:
-    """Test that LinearAutoGradNode is properly registered."""
+    """Test that LinearExplicitGrad is properly registered."""
 
     def test_node_type_registered(self):
-        """Test that linear_autograd node type is registered."""
-        node_class = get_node_class_from_type("linear_autograd")
-        assert node_class is LinearAutoGradNode
+        """Test that linear_explicit_grad node type is registered."""
+        node_class = get_node_class_from_type("linear_explicit_grad")
+        assert node_class is LinearExplicitGrad
 
     def test_network_creation_with_autograd_nodes(self, rng_key):
-        """Test that a network can be created using linear_autograd nodes."""
-        config = create_config("linear_autograd")
+        """Test that a network can be created using linear_explicit_grad nodes."""
+        config = create_config("linear_explicit_grad")
         params, structure = create_pc_graph(config, rng_key)
 
         assert len(structure.nodes) == 3
-        assert all(info.node_type == "linear_autograd" for info in structure.nodes.values())
+        assert all(info.node_type == "linear_explicit_grad" for info in structure.nodes.values())

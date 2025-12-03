@@ -18,6 +18,9 @@ python fabricpc/examples/mnist_demo.py
 
 ## Shape Conventions
 
+ All shapes use batch-first, channels-last format (NHWC, NLC, NDHWC):
+
+ - Consistent with JAX's default conv behavior
  - Linear: shape=(features,) - e.g., (128,) for 128-dimensional vector
  - 1D Conv: shape=(seq_len, channels) - e.g., (100, 32) for 100 timesteps, 32 channels
  - 2D Conv: shape=(H, W, C) - e.g., (28, 28, 64) for 28x28 image, 64 channels (NHWC)
