@@ -19,7 +19,8 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from fabricpc.graph.graph_net import create_pc_graph, initialize_state
+from fabricpc.graph.graph_net import create_pc_graph
+from fabricpc.graph.state_initializer import initialize_graph_state
 from fabricpc.core.inference import run_inference
 from fabricpc.training import train_step
 from fabricpc.training.optimizers import create_optimizer
@@ -71,7 +72,7 @@ class TestNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 10))
         clamps = {"input": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
         final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
 
         # Verify output shapes
@@ -114,7 +115,7 @@ class TestNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 10))
         clamps = {"image": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
         final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
 
         # Verify state shapes
@@ -152,7 +153,7 @@ class TestNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 10))
         clamps = {"image": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
         final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
 
         # Verify state shapes
@@ -189,7 +190,7 @@ class TestNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 100))
         clamps = {"rgb_image": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
         final_state = run_inference(params, state, clamps, structure, infer_steps=3, eta_infer=0.1)
 
         assert final_state.nodes["rgb_image"].z_latent.shape == (batch_size, 32, 32, 3)
@@ -232,7 +233,7 @@ class TestNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 10))
         clamps = {"image": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
         final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
 
         # Verify all intermediate shapes
@@ -271,7 +272,7 @@ class TestSameParamsDifferentBatchSizes:
             clamps = {"input": x, "output": y}
 
             # Initialize state with this batch size
-            state = initialize_state(structure, batch_size, key, clamps=clamps, params=params)
+            state = initialize_graph_state(structure, batch_size, key, clamps=clamps, params=params)
 
             # Run inference
             final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
@@ -313,7 +314,7 @@ class TestSameParamsDifferentBatchSizes:
             y = jax.random.normal(key, (batch_size, 10))
             clamps = {"image": x, "output": y}
 
-            state = initialize_state(structure, batch_size, key, clamps=clamps, params=params)
+            state = initialize_graph_state(structure, batch_size, key, clamps=clamps, params=params)
             final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
 
             # Verify shapes preserved
@@ -427,17 +428,18 @@ class TestEnergyWithNDimShapes:
         y = jax.random.normal(rng_key, (batch_size, 5))
         clamps = {"image": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
+        state = initialize_graph_state(structure, batch_size, rng_key, clamps=clamps, params=params)
 
-        # Get initial energy
+        # Run 1 step to get initial energy (energy is computed during inference, not initialization)
+        initial_state = run_inference(params, state, clamps, structure, infer_steps=1, eta_infer=0.1)
         initial_energy = sum(
-            jnp.sum(state.nodes[name].energy)
+            jnp.sum(initial_state.nodes[name].energy)
             for name in structure.nodes
             if structure.nodes[name].in_degree > 0
         )
 
-        # Run inference
-        final_state = run_inference(params, state, clamps, structure, infer_steps=10, eta_infer=0.1)
+        # Run more inference steps
+        final_state = run_inference(params, state, clamps, structure, infer_steps=20, eta_infer=0.1)
 
         # Get final energy
         final_energy = sum(

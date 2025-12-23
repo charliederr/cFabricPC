@@ -21,7 +21,7 @@ import optax
 
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure, NodeParams
 from fabricpc.core.inference import run_inference, gather_inputs
-from fabricpc.graph.graph_net import initialize_state
+from fabricpc.graph.state_initializer import initialize_graph_state
 from fabricpc.nodes import get_node_class
 
 
@@ -183,7 +183,7 @@ def train_step_autoregressive(
         clamps[mask_node] = causal_mask
 
     # Initialize state
-    init_state = initialize_state(
+    init_state = initialize_graph_state(
         structure, batch_size, rng_key, clamps=clamps, params=params
     )
 
@@ -362,7 +362,7 @@ def _generation_step(
     clamps = {input_node: input_onehot}
 
     # Initialize and run inference
-    state = initialize_state(
+    state = initialize_graph_state(
         structure, batch_size, init_key, clamps=clamps, params=params
     )
     final_state = run_inference(
@@ -592,7 +592,7 @@ def evaluate_autoregressive(
             clamps[structure.task_map["x"]] = batch["x"]
 
         # Initialize and run inference
-        state = initialize_state(
+        state = initialize_graph_state(
             structure, batch_size, batch_keys[batch_idx],
             clamps=clamps, params=params
         )

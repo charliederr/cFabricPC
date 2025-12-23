@@ -182,12 +182,14 @@ class GraphStructure(NamedTuple):
         edges: Dictionary mapping edge keys to EdgeInfo
         task_map: Dictionary mapping task names to node names
         node_order: Topological order for forward pass
+        config: Graph configuration
     """
 
     nodes: Dict[str, NodeInfo]
     edges: Dict[str, EdgeInfo]
     task_map: Dict[str, str]
     node_order: Tuple[str, ...]  # Topological sort for inference
+    config: Dict[str, Any]  # Graph configuration
 
     # CONFIG_SCHEMA defined below class
 
@@ -262,7 +264,7 @@ class GraphStructure(NamedTuple):
         # 5. Compute topological order
         node_order = cls._topological_sort(nodes, edges)
 
-        return cls(nodes=nodes, edges=edges, task_map=task_map, node_order=node_order)
+        return cls(nodes=nodes, edges=edges, task_map=task_map, node_order=node_order, config=validated_graph)
 
     @staticmethod
     def _topological_sort(
@@ -326,6 +328,11 @@ GraphStructure.CONFIG_SCHEMA = {
         "type": dict,
         "required": True,
         "description": "Mapping of task names to node names"
+    },
+    "graph_state_initializer": {
+        "type": dict,
+        "default": {"type": "feedforward", "fallback": {"type": "normal", "std": 0.05}},
+        "description": "Graph-level latent state initialization configuration"
     }
 }
 
@@ -364,6 +371,6 @@ tree_util.register_pytree_node(
 # GraphStructure is static, so we register it as having no dynamic components
 tree_util.register_pytree_node(
     GraphStructure,
-    lambda gs: ((), (gs.nodes, gs.edges, gs.task_map, gs.node_order)),
+    lambda gs: ((), (gs.nodes, gs.edges, gs.task_map, gs.node_order, gs.config)),
     lambda aux, _: GraphStructure(*aux),  # Reconstruct from aux data
 )

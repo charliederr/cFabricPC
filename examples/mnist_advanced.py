@@ -35,18 +35,47 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================================
-# ADVANCED NETWORK CONFIGURATION
+# ADVANCED NETWORK CONFIGURATION - FULLY EXPLICIT (NO DEFAULTS)
 # ==============================================================================
 # fmt: off
 
+# Detailed node configuration template
+template_node = {
+    "name": None,   # To be filled -> str
+    "shape": None,  # To be filled -> tuple of ints
+    "type": "linear",
+    "activation": {"type": "sigmoid"},
+    "energy": {"type": "gaussian", "precision": 1.0},
+    "weight_init": {"type": "normal", "mean": 0.0, "std": 0.05},
+    "use_bias": True,
+    "flatten_input": False,
+    "latent_init": None,  # Use graph-level default}
+}
+
 config = {
-    # Deeper 3-hidden-layer network
+    # Deeper 3-hidden-layer network with fully explicit configs
     "node_list": [
-        {"name": "pixels", "shape": (784,), "type": "linear", "activation": {"type": "identity"}},
-        {"name": "h1",     "shape": (256,), "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "h2",     "shape": (128,), "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "h3",     "shape": (64,), "type": "linear",  "activation": {"type": "sigmoid"}},
-        {"name": "class",  "shape": (10,), "type": "linear",  "activation": {"type": "sigmoid"}},
+        {   **template_node,
+            "name": "pixels",  # Override template fields
+            "shape": (784,),
+            "activation": {"type": "identity"},
+        },
+        {   **template_node,
+            "name": "h1",
+            "shape": (256,),
+        },
+        {   **template_node,
+            "name": "h2",
+            "shape": (128,),
+        },
+        {   **template_node,
+            "name": "h3",
+            "shape": (64,),
+        },
+        {   **template_node,
+            "name": "class",
+            "shape": (10,),
+        },
     ],
 
     "edge_list": [
@@ -57,6 +86,12 @@ config = {
     ],
 
     "task_map": {"x": "pixels", "y": "class"},
+
+    # Graph-level state initialization (feedforward with normal fallback)
+    "graph_state_initializer": {
+        "type": "feedforward",
+        "fallback": {"type": "normal", "mean": 0.0, "std": 0.05}
+    },
 }
 
 # More sophisticated training configuration

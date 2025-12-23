@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import optax
 
 from fabricpc.core.types import GraphParams, GraphStructure
-from fabricpc.graph.graph_net import initialize_state
+from fabricpc.graph.state_initializer import initialize_graph_state
 from fabricpc.training.train_autoregressive import create_causal_mask
 
 
@@ -56,9 +56,10 @@ def compute_loss(
         clamps[structure.task_map["x"]] = batch["x"]
 
     # Single forward pass via initialize_state with feedforward init
-    state = initialize_state(
+    state = initialize_graph_state(
         structure, batch_size, rng_key,
         clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"],
         params=params
     )
 
@@ -267,9 +268,10 @@ def compute_loss_autoregressive(
         clamps[structure.task_map["causal_mask"]] = causal_mask
 
     # Single forward pass
-    state = initialize_state(
+    state = initialize_graph_state(
         structure, batch_size, rng_key,
         clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"],
         params=params
     )
 
@@ -454,9 +456,10 @@ def eval_step_backprop(
 
     # Forward pass (input only clamped)
     clamps = {structure.task_map["x"]: batch["x"]}
-    state = initialize_state(
+    state = initialize_graph_state(
         structure, batch_size, rng_key,
         clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"],
         params=params
     )
 

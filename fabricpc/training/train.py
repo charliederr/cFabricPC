@@ -15,7 +15,7 @@ from fabricpc.core.inference import run_inference, gather_inputs
 from fabricpc.nodes import get_node_class
 from fabricpc.core.types import NodeParams
 
-
+# TODO move to graph_net.py
 def compute_local_weight_gradients(
     params: GraphParams,
     final_state: GraphState,
@@ -95,7 +95,7 @@ def train_step(
     Returns:
         Tuple of (updated_params, updated_opt_state, loss, final_state)
     """
-    from fabricpc.graph.graph_net import initialize_state
+    from fabricpc.graph.state_initializer import initialize_graph_state
 
     batch_size = next(iter(batch.values())).shape[0]
 
@@ -106,9 +106,10 @@ def train_step(
             node_name = structure.task_map[task_name]
             clamps[node_name] = task_value
 
-    # Initialize state
-    init_state = initialize_state(
-        structure, batch_size, rng_key, clamps=clamps, params=params
+    # Initialize state using graph config
+    init_state = initialize_graph_state(
+        structure, batch_size, rng_key, clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"], params=params
     )
 
     # Run inference to convergence
@@ -270,7 +271,7 @@ def eval_step(
     Returns:
         Tuple of (loss, correct, batch_size)
     """
-    from fabricpc.graph.graph_net import initialize_state
+    from fabricpc.graph.state_initializer import initialize_graph_state
 
     batch_size = batch["x"].shape[0]
 
@@ -281,8 +282,9 @@ def eval_step(
         clamps[x_node] = batch["x"]
 
     # Initialize and run inference
-    state = initialize_state(
-        structure, batch_size, rng_key, clamps=clamps, params=params
+    state = initialize_graph_state(
+        structure, batch_size, rng_key, clamps=clamps,
+        state_init_config=structure.config["graph_state_initializer"], params=params
     )
     final_state = run_inference(
         params, state, clamps, structure, infer_steps, eta_infer

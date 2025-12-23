@@ -15,7 +15,7 @@ Config schemas are defined at the appropriate level:
 - Energy/Activation schemas: Defined in their respective classes and validated via delegation
 """
 
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple
 import jax
 import jax.numpy as jnp
 from fabricpc.core.types import (
@@ -25,17 +25,10 @@ from fabricpc.core.types import (
     GraphState,
     GraphStructure,
 )
-from fabricpc.core.initialization import (
-    initialize_state_values,
-    parse_state_init_config,
-    get_default_state_init,
-)
 from fabricpc.nodes import get_node_class
-from fabricpc.core.inference import gather_inputs
 from fabricpc.utils.helpers import update_node_in_state
-from fabricpc.core.config import ConfigValidationError
 
-
+# TODO deprecated
 def build_graph_structure(config: dict) -> GraphStructure:
     """
     Convert configuration dictionary to static GraphStructure with slot validation.
@@ -54,7 +47,7 @@ def build_graph_structure(config: dict) -> GraphStructure:
     """
     return GraphStructure.from_config(config)
 
-
+# TODO create abstraction and config schema for param initialization, similar to graph state initialization
 def initialize_params(
     structure: GraphStructure,
     rng_key: jax.Array,  # from jax.random.PRNGKey
@@ -109,112 +102,6 @@ def initialize_params(
         node_params[node_name] = params_obj
 
     return GraphParams(nodes=node_params)
-
-
-def initialize_state(
-    structure: GraphStructure,
-    batch_size: int,
-    rng_key: jax.Array,
-    clamps: Dict[str, jnp.ndarray] = None,
-    state_init_config: Dict[str, Any] = None,
-    params: GraphParams = None,
-) -> GraphState:
-    """
-    Initialize graph state for inference.
-
-    Args:
-        structure: Graph structure
-        batch_size: Batch size
-        rng_key: JAX random key for state initialization
-        clamps: Optional dictionary of clamped values, keyed on node names
-        state_init_config: State initialization configuration dict
-        params: GraphParams (required for feedforward init)
-
-    Returns:
-        Initial GraphState with latent gradients
-    """
-    clamps = clamps or {}
-
-    # Use default if not provided
-    if state_init_config is None:
-        state_init_config = get_default_state_init()
-
-    # Parse initialization config
-    init_method, fallback_config = parse_state_init_config(state_init_config)
-
-    # Split rng_key for each node
-    node_names = list(structure.nodes.keys())
-    node_keys = jax.random.split(rng_key, len(node_names))
-    node_key_map = dict(zip(node_names, node_keys))
-    node_state_dict = {}
-
-    # Initialize all nodes, respecting clamps
-    for node_name, node_info in structure.nodes.items():
-        shape = (batch_size, *node_info.shape)
-
-        # Initialize z_latent
-        if node_name in clamps:
-            # Use clamped value
-            z_latent = clamps[node_name]
-        elif init_method == "zeros":
-            z_latent = jnp.zeros(shape)
-        elif init_method in ["uniform", "normal"]:
-            # Direct initialization with split key
-            z_latent = initialize_state_values(
-                fallback_config, node_key_map[node_name], shape
-            )
-        elif init_method == "feedforward":
-            # Initialize with fallback first using split key
-            z_latent = initialize_state_values(
-                fallback_config, node_key_map[node_name], shape
-            )
-        else:
-            raise ConfigValidationError(f"unknown init_method: {init_method}")
-
-        # Initialize latents, set other state components to zeros
-        node_state_dict[node_name] = NodeState(
-            z_latent=z_latent,  # init latent state
-            z_mu=jnp.zeros(shape),
-            error=jnp.zeros(shape),
-            energy=jnp.zeros((batch_size,)),  # Per-sample energy
-            pre_activation=jnp.zeros(shape),
-            latent_grad=jnp.zeros(shape),
-            substructure={},
-        )
-
-    # Create a draft graph state
-    state = GraphState(
-        nodes=node_state_dict,
-        batch_size=batch_size,
-    )
-    # Feedforward initialization if requested
-    if init_method == "feedforward" and params is not None:
-
-        # Process nodes in topological order
-        for node_name in structure.node_order:
-            node_info = structure.nodes[node_name]
-            if node_info.in_degree > 0:
-
-                # Collect edge inputs
-                node_state = state.nodes[node_name]
-                node_params = params.nodes[node_name]
-                node_class = get_node_class(node_info.node_type)
-                edge_inputs = gather_inputs(node_info, structure, state)
-
-                # Compute forward projection
-                _, node_state = node_class.forward(node_params, edge_inputs, node_state, node_info)
-
-                # Update the state with feedforward values
-                if node_name not in clamps:
-                    # z_latent <- z_mu_init
-                    node_state = node_state._replace(z_latent=node_state.z_mu)
-                else:
-                    # Respect clamped values
-                    node_state = node_state._replace(z_latent=clamps[node_name])
-                # Update state
-                state = state._replace(nodes={**state.nodes, node_name: node_state})
-
-    return state
 
 def set_latents_to_clamps(
     state: GraphState,

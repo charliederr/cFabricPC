@@ -98,6 +98,7 @@ class Conv2DNode(NodeBase):
             in_channels = in_shape[-1]  # Input channels from source
 
             # Initialize kernel with small values for stability
+            # TODO: use fabricpc.core.initializers import initialize
             std = 0.01  # Small init for predictive coding stability
             kernel = jax.random.normal(
                 keys[i],

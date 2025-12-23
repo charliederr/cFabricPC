@@ -22,7 +22,8 @@ import jax
 import jax.numpy as jnp
 
 from fabricpc.core.types import NodeState, NodeParams, GraphState
-from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure, initialize_state
+from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure
+from fabricpc.graph.state_initializer import initialize_graph_state
 from fabricpc.core.inference import run_inference
 from fabricpc.training import train_step, compute_local_weight_gradients
 from fabricpc.training.optimizers import create_optimizer
@@ -174,20 +175,25 @@ class TestInference:
         clamps = inference_data["clamps"]
         state_key = inference_data["state_key"]
 
-        # Initialize state
-        initial_state = initialize_state(
-            structure, batch_size, state_key, clamps=clamps, params=params
+        # Initialize state with feedforward initialization
+        initial_state = initialize_graph_state(
+            structure, batch_size, state_key, clamps=clamps,
+            state_init_config=structure.config["graph_state_initializer"], params=params
         )
 
         # Verify that energy field exists and is initialized
         assert "nodes" in initial_state._fields, "GraphState should have nodes field"
         assert isinstance(initial_state.nodes, dict), "nodes should be a dict"
 
-        # Run inference
-        infer_steps = 10
+        # Run 1 step to get initial energy (energy is computed during inference, not init)
         eta_infer = 0.1
+        state_after_1_step = run_inference(
+            params, initial_state, clamps, structure, infer_steps=1, eta_infer=eta_infer
+        )
+
+        # Run more steps for final state
         final_state = run_inference(
-            params, initial_state, clamps, structure, infer_steps, eta_infer
+            params, initial_state, clamps, structure, infer_steps=20, eta_infer=eta_infer
         )
 
         # Verify that latent gradients were computed
@@ -195,9 +201,9 @@ class TestInference:
         assert "latent_grad" in final_state.nodes["hidden1"]._fields, "Should have latent gradients"
         assert final_state.nodes["hidden1"].latent_grad.shape == (batch_size, 20), "Gradient shape mismatch"
 
-        # Check that energy decreased
+        # Check that energy decreased (comparing 1 step vs 20 steps)
         initial_energy = sum(
-            jnp.sum(initial_state.nodes[name].energy)
+            jnp.sum(state_after_1_step.nodes[name].energy)
             for name in structure.nodes
             if structure.nodes[name].in_degree > 0
         )
@@ -220,8 +226,9 @@ class TestInference:
         state_key = inference_data["state_key"]
 
         # Initialize and run inference
-        initial_state = initialize_state(
-            structure, batch_size, state_key, clamps=clamps, params=params
+        initial_state = initialize_graph_state(
+            structure, batch_size, state_key, clamps=clamps,
+            state_init_config=structure.config["graph_state_initializer"], params=params
         )
         final_state = run_inference(
             params, initial_state, clamps, structure, infer_steps=10, eta_infer=0.1

@@ -14,7 +14,8 @@ import jax
 import jax.numpy as jnp
 
 from fabricpc.core.types import NodeState, NodeParams, NodeInfo
-from fabricpc.graph.graph_net import create_pc_graph, initialize_state
+from fabricpc.graph.graph_net import create_pc_graph
+from fabricpc.graph.state_initializer import initialize_graph_state
 from fabricpc.core.inference import run_inference, gather_inputs
 from fabricpc.nodes import get_node_class, LinearNode, LinearExplicitGrad, validate_node_config
 
@@ -256,10 +257,10 @@ class TestLinearAutoGradNode:
         clamps = {"input": x_data, "output": y_data}
 
         # Initialize states identically
-        state_linear = initialize_state(
+        state_linear = initialize_graph_state(
             structure_linear, batch_size, rngkey_state, clamps=clamps, params=params_linear
         )
-        state_autograd = initialize_state(
+        state_autograd = initialize_graph_state(
             structure_autograd, batch_size, rngkey_state, clamps=clamps, params=params_autograd
         )
 

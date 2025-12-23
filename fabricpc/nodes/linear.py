@@ -23,7 +23,7 @@ from fabricpc.nodes.base import NodeBase, SlotSpec, FlattenInputMixin
 from fabricpc.nodes.registry import register_node
 from fabricpc.core.types import NodeParams, NodeState, NodeInfo
 from fabricpc.core.activations import get_activation
-from fabricpc.core.initialization import initialize_weights
+from fabricpc.core.initializers import initialize
 
 
 @register_node("linear")
@@ -127,8 +127,8 @@ class LinearNode(FlattenInputMixin, NodeBase):
                 out_features = node_shape[-1]
                 weight_shape = (in_features, out_features)
 
-            weights_dict[edge_key] = initialize_weights(
-                weight_init_config, rand_key_w[edge_key], weight_shape
+            weights_dict[edge_key] = initialize(
+               rand_key_w[edge_key], weight_shape, weight_init_config
             )
 
         # Initialize bias (usually zeros)

@@ -12,8 +12,7 @@ import optax
 
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
 from fabricpc.core.inference import run_inference
-from fabricpc.graph.graph_net import initialize_state
-from fabricpc.core.initialization import get_default_state_init
+from fabricpc.graph.state_initializer import initialize_graph_state
 
 
 def replicate_params(params: GraphParams, n_devices: int) -> GraphParams:
@@ -133,10 +132,8 @@ def train_step_pmap(
                 clamps[node_name] = task_value
 
         # Initialize state
-        # Use provided config or default
-        init_config = state_init_config if state_init_config is not None else get_default_state_init()
-        init_state = initialize_state(
-            structure, batch_size, rng_key, clamps=clamps, state_init_config=init_config, params=params
+        init_state = initialize_graph_state(
+            structure, batch_size, rng_key, clamps=clamps, state_init_config=state_init_config, params=params
         )
 
         # Run inference
@@ -367,10 +364,8 @@ def evaluate_pcn_multi_gpu(
                 node_name = structure.task_map[task_name]
                 clamps[node_name] = task_value
 
-        # Use provided config or default
-        init_config = state_init_config if state_init_config is not None else get_default_state_init()
-        state = initialize_state(
-            structure, batch_size_, randgen_key, clamps=clamps, state_init_config=init_config, params=params_obj
+        state = initialize_graph_state(
+            structure, batch_size_, randgen_key, clamps=clamps, state_init_config=state_init_config, params=params_obj
         )
         final_state = run_inference(params_obj, state, clamps, structure, infer_steps, eta_infer)
         return final_state
