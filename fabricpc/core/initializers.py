@@ -481,8 +481,7 @@ def initialize(
     Args:
         key: JAX random key
         shape: Shape of array to create
-        config: Initializer configuration dict with "type" and other params.
-                If None, uses normal initialization with defaults.
+        config: Initializer configuration dict specifying an object implementing InitializerBase.
 
     Returns:
         Initialized array

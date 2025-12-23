@@ -293,14 +293,6 @@ class TestConfigValidation:
         assert validated["mean"] == 1.0
         assert validated["std"] == 0.5
 
-    def test_initialize_with_none_config(self, rng_key):
-        """Test initialize with None config uses normal defaults."""
-        result = initialize(rng_key, (100, 100), None)
-
-        # Should use normal distribution with defaults
-        assert result.shape == (100, 100)
-        assert jnp.abs(jnp.mean(result)) < 0.1
-
     def test_default_weight_init(self):
         """Test get_default_weight_init returns normal config."""
         config = get_default_weight_init()

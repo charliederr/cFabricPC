@@ -26,7 +26,6 @@ from fabricpc.graph.state_initializer import (
     list_state_init_types,
     unregister_state_init,
     initialize_graph_state,
-    get_default_graph_state_init,
     StateInitRegistrationError,
 )
 
@@ -353,14 +352,6 @@ class TestClampHandling:
 
 class TestConvenienceFunctions:
     """Test convenience functions."""
-
-    def test_get_default_graph_state_init(self):
-        """Test default graph state init config."""
-        config = get_default_graph_state_init()
-
-        assert config["type"] == "feedforward"
-        assert "fallback" in config
-        assert config["fallback"]["type"] == "normal"
 
     def test_initialize_state_wrapper(self, simple_graph_config, rng_key):
         """Test that initialize_state wrapper works correctly."""

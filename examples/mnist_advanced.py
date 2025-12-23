@@ -39,49 +39,42 @@ np.random.seed(0)
 # ==============================================================================
 # fmt: off
 
-# Weight initialization config (used for all nodes)
-weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.05}
-
-# Energy functional config (Gaussian with precision=1.0)
-energy_config = {"type": "gaussian", "precision": 1.0}
+# Detailed node configuration template
+template_node = {
+    "name": None,   # To be filled -> str
+    "shape": None,  # To be filled -> tuple of ints
+    "type": "linear",
+    "activation": {"type": "sigmoid"},
+    "energy": {"type": "gaussian", "precision": 1.0},
+    "weight_init": {"type": "normal", "mean": 0.0, "std": 0.05},
+    "use_bias": True,
+    "flatten_input": False,
+    "latent_init": None,  # Use graph-level default}
+}
 
 config = {
     # Deeper 3-hidden-layer network with fully explicit configs
     "node_list": [
-        {
-            "name": "pixels", "shape": (784,), "type": "linear",
+        {   **template_node,
+            "name": "pixels",  # Override template fields
+            "shape": (784,),
             "activation": {"type": "identity"},
-            "energy": energy_config,
-            "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "latent_init": None,  # Use graph-level default
         },
-        {
-            "name": "h1", "shape": (256,), "type": "linear",
-            "activation": {"type": "sigmoid"},
-            "energy": energy_config,
-            "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "latent_init": None,
+        {   **template_node,
+            "name": "h1",
+            "shape": (256,),
         },
-        {
-            "name": "h2", "shape": (128,), "type": "linear",
-            "activation": {"type": "sigmoid"},
-            "energy": energy_config,
-            "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": True, "latent_init": None,
+        {   **template_node,
+            "name": "h2",
+            "shape": (128,),
         },
-        {
-            "name": "h3", "shape": (64,), "type": "linear",
-            "activation": {"type": "sigmoid"},
-            "energy": energy_config,
-            "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "latent_init": None,
+        {   **template_node,
+            "name": "h3",
+            "shape": (64,),
         },
-        {
-            "name": "class", "shape": (10,), "type": "linear",
-            "activation": {"type": "sigmoid"},
-            "energy": energy_config,
-            "weight_init": weight_init_config,
-            "use_bias": True, "flatten_input": False, "latent_init": None,
+        {   **template_node,
+            "name": "class",
+            "shape": (10,),
         },
     ],
 

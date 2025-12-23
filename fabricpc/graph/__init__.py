@@ -16,7 +16,6 @@ from fabricpc.graph.state_initializer import (
     get_state_init_class,
     list_state_init_types,
     initialize_graph_state,
-    get_default_graph_state_init,
 )
 
 __all__ = [
@@ -32,5 +31,4 @@ __all__ = [
     "get_state_init_class",
     "list_state_init_types",
     "initialize_graph_state",
-    "get_default_graph_state_init",
 ]

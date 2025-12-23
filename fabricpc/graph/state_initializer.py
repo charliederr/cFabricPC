@@ -468,13 +468,5 @@ def initialize_graph_state(
     )
 
 
-def get_default_graph_state_init() -> Dict[str, Any]:
-    """Get default graph state initialization config."""
-    return {
-        "type": "feedforward",
-        "fallback": {"type": "normal", "std": 0.05}
-    }
-
-
 # Auto-discover external state initializers on import
 discover_external_state_inits()

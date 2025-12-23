@@ -23,7 +23,6 @@ import jax.numpy as jnp
 
 from fabricpc.core.types import NodeState, NodeParams, GraphState
 from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure, initialize_state
-from fabricpc.graph.state_initializer import get_default_graph_state_init
 from fabricpc.core.inference import run_inference
 from fabricpc.training import train_step, compute_local_weight_gradients
 from fabricpc.training.optimizers import create_optimizer
@@ -176,10 +175,9 @@ class TestInference:
         state_key = inference_data["state_key"]
 
         # Initialize state with feedforward initialization
-        state_init_config = get_default_graph_state_init()
         initial_state = initialize_state(
             structure, batch_size, state_key, clamps=clamps,
-            state_init_config=state_init_config, params=params
+            state_init_config=structure.config["graph_state_initializer"], params=params
         )
 
         # Verify that energy field exists and is initialized
@@ -227,10 +225,9 @@ class TestInference:
         state_key = inference_data["state_key"]
 
         # Initialize and run inference
-        state_init_config = get_default_graph_state_init()
         initial_state = initialize_state(
             structure, batch_size, state_key, clamps=clamps,
-            state_init_config=state_init_config, params=params
+            state_init_config=structure.config["graph_state_initializer"], params=params
         )
         final_state = run_inference(
             params, initial_state, clamps, structure, infer_steps=10, eta_infer=0.1

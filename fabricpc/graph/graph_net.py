@@ -121,7 +121,7 @@ def initialize_state(
         rng_key: JAX random key for state initialization
         clamps: Optional dictionary of clamped values, keyed on node names
         state_init_config: State initialization configuration dict with "type" field.
-                          Required. Use get_default_graph_state_init() for default.
+                          Use structure.config["graph_state_initializer"] for default.
         params: GraphParams (required for feedforward init)
 
     Returns:
