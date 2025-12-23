@@ -20,6 +20,7 @@ from hypothesis import given, strategies as st, settings
 from fabricpc.core.types import NodeState, GraphState
 from fabricpc.core.config import ConfigValidationError
 from fabricpc.graph.graph_net import create_pc_graph, build_graph_structure, initialize_state
+from fabricpc.graph.state_initializer import get_default_graph_state_init
 from fabricpc.core.inference import run_inference
 
 # Set up JAX
@@ -291,12 +292,19 @@ class TestComplexGraphs:
         y = jax.random.normal(rng_key, (batch_size, 5))
         clamps = {"input": x, "output": y}
 
-        state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
-        final_state = run_inference(params, state, clamps, structure, infer_steps=5, eta_infer=0.1)
+        state_init_config = get_default_graph_state_init()
+        state = initialize_state(
+            structure, batch_size, rng_key, clamps=clamps,
+            state_init_config=state_init_config, params=params
+        )
 
-        # Verify convergence
+        # Run 1 step to get initial energy (energy is computed during inference)
+        state_after_1_step = run_inference(params, state, clamps, structure, infer_steps=1, eta_infer=0.1)
+        final_state = run_inference(params, state, clamps, structure, infer_steps=10, eta_infer=0.1)
+
+        # Verify convergence (comparing 1 step vs 10 steps)
         initial_energy = sum(
-            jnp.sum(state.nodes[name].energy)
+            jnp.sum(state_after_1_step.nodes[name].energy)
             for name in structure.nodes
             if structure.nodes[name].in_degree > 0
         )

@@ -35,18 +35,54 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 # ==============================================================================
-# ADVANCED NETWORK CONFIGURATION
+# ADVANCED NETWORK CONFIGURATION - FULLY EXPLICIT (NO DEFAULTS)
 # ==============================================================================
 # fmt: off
 
+# Weight initialization config (used for all nodes)
+weight_init_config = {"type": "normal", "mean": 0.0, "std": 0.05}
+
+# Energy functional config (Gaussian with precision=1.0)
+energy_config = {"type": "gaussian", "precision": 1.0}
+
 config = {
-    # Deeper 3-hidden-layer network
+    # Deeper 3-hidden-layer network with fully explicit configs
     "node_list": [
-        {"name": "pixels", "shape": (784,), "type": "linear", "activation": {"type": "identity"}},
-        {"name": "h1",     "shape": (256,), "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "h2",     "shape": (128,), "type": "linear", "activation": {"type": "sigmoid"}},
-        {"name": "h3",     "shape": (64,), "type": "linear",  "activation": {"type": "sigmoid"}},
-        {"name": "class",  "shape": (10,), "type": "linear",  "activation": {"type": "sigmoid"}},
+        {
+            "name": "pixels", "shape": (784,), "type": "linear",
+            "activation": {"type": "identity"},
+            "energy": energy_config,
+            "weight_init": weight_init_config,
+            "use_bias": True, "flatten_input": False, "state_initializer": None,  # Use graph-level default
+        },
+        {
+            "name": "h1", "shape": (256,), "type": "linear",
+            "activation": {"type": "sigmoid"},
+            "energy": energy_config,
+            "weight_init": weight_init_config,
+            "use_bias": True, "flatten_input": False, "state_initializer": None,
+        },
+        {
+            "name": "h2", "shape": (128,), "type": "linear",
+            "activation": {"type": "sigmoid"},
+            "energy": energy_config,
+            "weight_init": weight_init_config,
+            "use_bias": True, "flatten_input": True, "state_initializer": None,
+        },
+        {
+            "name": "h3", "shape": (64,), "type": "linear",
+            "activation": {"type": "sigmoid"},
+            "energy": energy_config,
+            "weight_init": weight_init_config,
+            "use_bias": True, "flatten_input": False, "state_initializer": None,
+        },
+        {
+            "name": "class", "shape": (10,), "type": "linear",
+            "activation": {"type": "sigmoid"},
+            "energy": energy_config,
+            "weight_init": weight_init_config,
+            "use_bias": True, "flatten_input": False, "state_initializer": None,
+        },
     ],
 
     "edge_list": [
@@ -57,6 +93,12 @@ config = {
     ],
 
     "task_map": {"x": "pixels", "y": "class"},
+
+    # Graph-level state initialization (feedforward with normal fallback)
+    "graph_state_initializer": {
+        "type": "feedforward",
+        "fallback": {"type": "normal", "mean": 0.0, "std": 0.05}
+    },
 }
 
 # More sophisticated training configuration

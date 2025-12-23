@@ -429,15 +429,16 @@ class TestEnergyWithNDimShapes:
 
         state = initialize_state(structure, batch_size, rng_key, clamps=clamps, params=params)
 
-        # Get initial energy
+        # Run 1 step to get initial energy (energy is computed during inference, not initialization)
+        initial_state = run_inference(params, state, clamps, structure, infer_steps=1, eta_infer=0.1)
         initial_energy = sum(
-            jnp.sum(state.nodes[name].energy)
+            jnp.sum(initial_state.nodes[name].energy)
             for name in structure.nodes
             if structure.nodes[name].in_degree > 0
         )
 
-        # Run inference
-        final_state = run_inference(params, state, clamps, structure, infer_steps=10, eta_infer=0.1)
+        # Run more inference steps
+        final_state = run_inference(params, state, clamps, structure, infer_steps=20, eta_infer=0.1)
 
         # Get final energy
         final_energy = sum(

@@ -24,13 +24,22 @@ from fabricpc.core.inference import (
     run_inference,
 )
 
-# Initialization utilities
+# Initialization utilities (backward compatible)
 from fabricpc.core.initialization import (
     initialize_weights,
     initialize_state_values,
     parse_state_init_config,
     get_default_weight_init,
     get_default_state_init,
+)
+
+# Initializer registry
+from fabricpc.core.initializers import (
+    InitializerBase,
+    register_initializer,
+    get_initializer_class,
+    list_initializer_types,
+    initialize,
 )
 
 __all__ = [
@@ -49,10 +58,16 @@ __all__ = [
     "gather_inputs",
     "inference_step",
     "run_inference",
-    # Initialization
+    # Initialization (backward compatible)
     "initialize_weights",
     "initialize_state_values",
     "parse_state_init_config",
     "get_default_weight_init",
     "get_default_state_init",
+    # Initializer registry
+    "InitializerBase",
+    "register_initializer",
+    "get_initializer_class",
+    "list_initializer_types",
+    "initialize",
 ]

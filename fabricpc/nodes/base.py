@@ -149,6 +149,9 @@ class NodeBase(ABC):
 
     # Default activation config - can be overridden by subclass or per-node via node_config["activation"]
     DEFAULT_ACTIVATION_CONFIG: Dict[str, Any] = {"type": "identity"}
+
+    # Node-level state initialization config
+    DEFAULT_STATE_INIT: Dict[str, Any] = {"type": "normal"}
     
     @staticmethod
     @abstractmethod
@@ -398,6 +401,9 @@ class NodeBase(ABC):
         # 4. Resolve activation config (user override or class default)
         validated_config["activation"] = cls._resolve_activation_config(node_config)
 
+        # 5. Resolve state initialization config (user override or class default)
+        validated_config["state_initializer"] = cls._resolve_state_init_config(node_config)
+
         # Construct the node object with validated config (includes defaults)
         return NodeInfo(
             name=node_name,
@@ -488,8 +494,7 @@ class NodeBase(ABC):
         elif isinstance(energy_config, str):
             energy_config = {"type": energy_config}
 
-        energy_type = energy_config.get("type", "gaussian")
-        energy_class = get_energy_class(energy_type)
+        energy_class = get_energy_class(energy_config["type"])
         return validate_energy_config(energy_class, energy_config)
 
     @classmethod
@@ -515,6 +520,31 @@ class NodeBase(ABC):
         elif isinstance(act_config, str):
             act_config = {"type": act_config}
 
-        act_type = act_config.get("type", "identity")
-        act_class = get_activation_class(act_type)
+        act_class = get_activation_class(act_config["type"])
         return validate_activation_config(act_class, act_config)
+
+    @classmethod
+    def _resolve_state_init_config(cls, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resolve state initialization config with validation.
+
+        Uses node_config["state_initializer"] if specified, otherwise falls back to
+        cls.DEFAULT_STATE_INIT. Validates against state initializer class CONFIG_SCHEMA.
+
+        Args:
+            node_config: Node configuration dictionary
+
+        Returns:
+            Validated state initialization config dict
+        """
+        from fabricpc.core.initializers import get_initializer_class, validate_initializer_config
+
+        state_init_config = node_config.get("state_initializer")
+
+        if state_init_config is None:
+            state_init_config = cls.DEFAULT_STATE_INIT.copy()
+        elif isinstance(state_init_config, str):
+            state_init_config = {"type": state_init_config}
+
+        init_class = get_initializer_class(state_init_config["type"])
+        return validate_initializer_config(init_class, state_init_config)

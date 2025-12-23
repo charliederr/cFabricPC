@@ -96,6 +96,7 @@ def train_step(
         Tuple of (updated_params, updated_opt_state, loss, final_state)
     """
     from fabricpc.graph.graph_net import initialize_state
+    from fabricpc.graph.state_initializer import get_default_graph_state_init
 
     batch_size = next(iter(batch.values())).shape[0]
 
@@ -106,9 +107,11 @@ def train_step(
             node_name = structure.task_map[task_name]
             clamps[node_name] = task_value
 
-    # Initialize state
+    # Initialize state with feedforward initialization
+    state_init_config = get_default_graph_state_init()
     init_state = initialize_state(
-        structure, batch_size, rng_key, clamps=clamps, params=params
+        structure, batch_size, rng_key, clamps=clamps,
+        state_init_config=state_init_config, params=params
     )
 
     # Run inference to convergence
@@ -271,6 +274,7 @@ def eval_step(
         Tuple of (loss, correct, batch_size)
     """
     from fabricpc.graph.graph_net import initialize_state
+    from fabricpc.graph.state_initializer import get_default_graph_state_init
 
     batch_size = batch["x"].shape[0]
 
@@ -281,8 +285,10 @@ def eval_step(
         clamps[x_node] = batch["x"]
 
     # Initialize and run inference
+    state_init_config = get_default_graph_state_init()
     state = initialize_state(
-        structure, batch_size, rng_key, clamps=clamps, params=params
+        structure, batch_size, rng_key, clamps=clamps,
+        state_init_config=state_init_config, params=params
     )
     final_state = run_inference(
         params, state, clamps, structure, infer_steps, eta_infer
