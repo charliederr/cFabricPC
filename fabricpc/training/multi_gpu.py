@@ -209,7 +209,7 @@ def train_pcn_multi_gpu(
         Trained parameters (single device)
 
     Example:
-        >>> params, structure = create_pc_graph(config, jax.random.PRNGKey(0))
+        >>> params = initialize_params(structure, jax.random.PRNGKey(0))
         >>> trained = train_pcn_multi_gpu(params, structure, train_loader, config)
     """
     from fabricpc.training.optimizers import create_optimizer
@@ -347,8 +347,6 @@ def evaluate_pcn_multi_gpu(
 
     infer_steps = config.get("infer_steps", 20)
     eta_infer = config.get("eta_infer", 0.1)
-    state_init_config = structure.config["graph_state_initializer"]
-
     # Estimate number of batches for key splitting
     num_batches = len(test_loader)
 
@@ -375,7 +373,6 @@ def evaluate_pcn_multi_gpu(
             batch_size_,
             randgen_key,
             clamps=clamps,
-            state_init_config=state_init_config,
             params=params_obj,
         )
         final_state = run_inference(

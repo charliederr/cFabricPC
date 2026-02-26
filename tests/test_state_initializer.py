@@ -8,6 +8,7 @@ Tests:
 - FeedforwardStateInit requires params
 - FeedforwardStateInit topological propagation
 - Clamp handling in both strategies
+- Custom state initializer via subclassing
 """
 
 import os
@@ -19,15 +20,27 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from fabricpc.graph.graph_net import create_pc_graph
+from fabricpc.nodes import Linear
+from fabricpc.nodes.transformer import TransformerBlock
+from fabricpc.builder import Edge, TaskMap, graph
+from fabricpc.graph import initialize_params
+from fabricpc.core.activations import (
+    IdentityActivation,
+    ReLUActivation,
+    SoftmaxActivation,
+    GeluActivation,
+)
+from fabricpc.core.initializers import (
+    NormalInitializer,
+    UniformInitializer,
+    ZerosInitializer,
+)
 from fabricpc.graph.state_initializer import (
     StateInitBase,
-    register_state_init,
-    get_state_init_class,
-    list_state_init_types,
-    unregister_state_init,
+    GlobalStateInit,
+    NodeDistributionStateInit,
+    FeedforwardStateInit,
     initialize_graph_state,
-    StateInitRegistrationError,
 )
 
 jax.config.update("jax_platform_name", "cpu")
@@ -40,68 +53,32 @@ def rng_key():
 
 
 @pytest.fixture
-def simple_graph_config():
-    """Simple 3-layer graph config for testing."""
-    return {
-        "node_list": [
-            {"name": "input", "shape": (784,), "type": "linear"},
-            {
-                "name": "hidden",
-                "shape": (128,),
-                "type": "linear",
-                "activation": {"type": "relu"},
-            },
-            {"name": "output", "shape": (10,), "type": "linear"},
+def simple_graph_structure(rng_key):
+    """Simple 3-layer graph structure for testing."""
+    input_node = Linear(shape=(784,), name="input")
+    hidden_node = Linear(shape=(128,), activation=ReLUActivation(), name="hidden")
+    output_node = Linear(shape=(10,), name="output")
+
+    structure = graph(
+        nodes=[input_node, hidden_node, output_node],
+        edges=[
+            Edge(source=input_node, target=hidden_node.slot("in")),
+            Edge(source=hidden_node, target=output_node.slot("in")),
         ],
-        "edge_list": [
-            {"source_name": "input", "target_name": "hidden", "slot": "in"},
-            {"source_name": "hidden", "target_name": "output", "slot": "in"},
-        ],
-        "task_map": {"x": "input", "y": "output"},
-    }
-
-
-class TestStateInitRegistry:
-    """Test suite for state initializer registry operations."""
-
-    def test_list_state_init_types(self):
-        """Test listing registered state init types."""
-        types = list_state_init_types()
-
-        # Should include built-in types
-        assert "global" in types
-        assert "node_distribution" in types
-        assert "feedforward" in types
-
-    def test_get_state_init_class(self):
-        """Test getting state init class by type."""
-        dist_class = get_state_init_class("node_distribution")
-
-        assert dist_class is not None
-        assert hasattr(dist_class, "initialize_state")
-        assert hasattr(dist_class, "CONFIG_SCHEMA")
-
-    def test_get_state_init_class_case_insensitive(self):
-        """Test that type lookup is case-insensitive."""
-        assert get_state_init_class("node_Distribution") == get_state_init_class(
-            "node_distribution"
-        )
-        assert get_state_init_class("FEEDFORWARD") == get_state_init_class(
-            "feedforward"
-        )
-
-    def test_get_unknown_type_raises(self):
-        """Test that unknown type raises ValueError."""
-        with pytest.raises(ValueError, match="Unknown"):
-            get_state_init_class("nonexistent_state_init")
+        task_map=TaskMap(x=input_node, y=output_node),
+    )
+    return structure
 
 
 class TestDistributionStateInit:
     """Test suite for GlobalStateInit."""
 
-    def test_distribution_init_graph_level_config(self, simple_graph_config, rng_key):
+    def test_distribution_init_graph_level_config(
+        self, simple_graph_structure, rng_key
+    ):
         """Test distribution init with graph-level default initializer."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 8
         x = jax.random.normal(rng_key, (batch_size, 784))
@@ -113,10 +90,7 @@ class TestDistributionStateInit:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={
-                "type": "global",
-                "initializer": {"type": "normal", "std": 0.1},
-            },
+            state_init=GlobalStateInit(initializer=NormalInitializer(std=0.1)),
         )
 
         # Verify state structure
@@ -135,9 +109,10 @@ class TestDistributionStateInit:
         hidden_std = jnp.std(state.nodes["hidden"].z_latent)
         assert hidden_std > 0.05 and hidden_std < 0.2
 
-    def test_distribution_init_with_zeros(self, simple_graph_config, rng_key):
+    def test_distribution_init_with_zeros(self, simple_graph_structure, rng_key):
         """Test distribution init with zeros initializer."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 784))
@@ -149,7 +124,7 @@ class TestDistributionStateInit:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "global", "initializer": {"type": "zeros"}},
+            state_init=GlobalStateInit(initializer=ZerosInitializer()),
         )
 
         # Hidden should be all zeros
@@ -157,26 +132,25 @@ class TestDistributionStateInit:
 
     def test_distribution_init_node_level_override(self, rng_key):
         """Test distribution init with node-level latent_init override."""
-        config = {
-            "node_list": [
-                {"name": "input", "shape": (32,), "type": "linear"},
-                {
-                    "name": "hidden",
-                    "shape": (16,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                    "latent_init": {"type": "uniform", "min": -1.0, "max": 1.0},
-                },
-                {"name": "output", "shape": (8,), "type": "linear"},
-            ],
-            "edge_list": [
-                {"source_name": "input", "target_name": "hidden", "slot": "in"},
-                {"source_name": "hidden", "target_name": "output", "slot": "in"},
-            ],
-            "task_map": {"x": "input", "y": "output"},
-        }
+        input_node = Linear(shape=(32,), name="input")
+        hidden_node = Linear(
+            shape=(16,),
+            activation=ReLUActivation(),
+            latent_init=UniformInitializer(min_val=-1.0, max_val=1.0),
+            name="hidden",
+        )
+        output_node = Linear(shape=(8,), name="output")
 
-        params, structure = create_pc_graph(config, rng_key)
+        structure = graph(
+            nodes=[input_node, hidden_node, output_node],
+            edges=[
+                Edge(source=input_node, target=hidden_node.slot("in")),
+                Edge(source=hidden_node, target=output_node.slot("in")),
+            ],
+            task_map=TaskMap(x=input_node, y=output_node),
+        )
+
+        params = initialize_params(structure, rng_key)
 
         batch_size = 8
         x = jax.random.normal(rng_key, (batch_size, 32))
@@ -188,9 +162,7 @@ class TestDistributionStateInit:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={
-                "type": "node_distribution",
-            },
+            state_init=NodeDistributionStateInit(),
         )
 
         # Hidden should be uniform(-1, 1) due to node-level override
@@ -203,9 +175,9 @@ class TestDistributionStateInit:
 class TestFeedforwardStateInit:
     """Test suite for FeedforwardStateInit."""
 
-    def test_feedforward_init_requires_params(self, simple_graph_config, rng_key):
+    def test_feedforward_init_requires_params(self, simple_graph_structure, rng_key):
         """Test that feedforward init raises error without params."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 784))
@@ -218,13 +190,14 @@ class TestFeedforwardStateInit:
                 batch_size,
                 rng_key,
                 clamps,
-                state_init_config={"type": "feedforward"},
+                state_init=FeedforwardStateInit(),
                 params=None,  # No params provided
             )
 
-    def test_feedforward_init_with_params(self, simple_graph_config, rng_key):
+    def test_feedforward_init_with_params(self, simple_graph_structure, rng_key):
         """Test feedforward init propagates through network."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 784))
@@ -236,7 +209,7 @@ class TestFeedforwardStateInit:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -253,39 +226,24 @@ class TestFeedforwardStateInit:
     def test_feedforward_init_topological_order(self, rng_key):
         """Test feedforward init processes nodes in topological order."""
         # Create a deeper network to test ordering
-        config = {
-            "node_list": [
-                {"name": "input", "shape": (32,), "type": "linear"},
-                {
-                    "name": "h1",
-                    "shape": (16,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {
-                    "name": "h2",
-                    "shape": (16,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {
-                    "name": "h3",
-                    "shape": (8,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {"name": "output", "shape": (4,), "type": "linear"},
-            ],
-            "edge_list": [
-                {"source_name": "input", "target_name": "h1", "slot": "in"},
-                {"source_name": "h1", "target_name": "h2", "slot": "in"},
-                {"source_name": "h2", "target_name": "h3", "slot": "in"},
-                {"source_name": "h3", "target_name": "output", "slot": "in"},
-            ],
-            "task_map": {"x": "input", "y": "output"},
-        }
+        input_node = Linear(shape=(32,), name="input")
+        h1_node = Linear(shape=(16,), activation=ReLUActivation(), name="h1")
+        h2_node = Linear(shape=(16,), activation=ReLUActivation(), name="h2")
+        h3_node = Linear(shape=(8,), activation=ReLUActivation(), name="h3")
+        output_node = Linear(shape=(4,), name="output")
 
-        params, structure = create_pc_graph(config, rng_key)
+        structure = graph(
+            nodes=[input_node, h1_node, h2_node, h3_node, output_node],
+            edges=[
+                Edge(source=input_node, target=h1_node.slot("in")),
+                Edge(source=h1_node, target=h2_node.slot("in")),
+                Edge(source=h2_node, target=h3_node.slot("in")),
+                Edge(source=h3_node, target=output_node.slot("in")),
+            ],
+            task_map=TaskMap(x=input_node, y=output_node),
+        )
+
+        params = initialize_params(structure, rng_key)
 
         batch_size = 2
         x = jax.random.normal(rng_key, (batch_size, 32))
@@ -297,7 +255,7 @@ class TestFeedforwardStateInit:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -311,9 +269,10 @@ class TestFeedforwardStateInit:
 class TestClampHandling:
     """Test clamp handling in state initialization."""
 
-    def test_distribution_init_respects_clamps(self, simple_graph_config, rng_key):
+    def test_distribution_init_respects_clamps(self, simple_graph_structure, rng_key):
         """Test that distribution init respects clamped values."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jnp.ones((batch_size, 784)) * 5.0  # Specific clamped value
@@ -325,16 +284,17 @@ class TestClampHandling:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "node_distribution"},
+            state_init=NodeDistributionStateInit(),
         )
 
         # Clamped nodes should have exact clamped values
         assert jnp.allclose(state.nodes["input"].z_latent, x)
         assert jnp.allclose(state.nodes["output"].z_latent, y)
 
-    def test_feedforward_init_respects_clamps(self, simple_graph_config, rng_key):
+    def test_feedforward_init_respects_clamps(self, simple_graph_structure, rng_key):
         """Test that feedforward init respects clamped values."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jnp.ones((batch_size, 784)) * 2.0
@@ -346,7 +306,7 @@ class TestClampHandling:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -354,9 +314,10 @@ class TestClampHandling:
         assert jnp.allclose(state.nodes["input"].z_latent, x)
         assert jnp.allclose(state.nodes["output"].z_latent, y)
 
-    def test_partial_clamps(self, simple_graph_config, rng_key):
+    def test_partial_clamps(self, simple_graph_structure, rng_key):
         """Test initialization with only some nodes clamped."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jnp.ones((batch_size, 784)) * 3.0
@@ -367,7 +328,7 @@ class TestClampHandling:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -382,16 +343,17 @@ class TestClampHandling:
 class TestConvenienceFunctions:
     """Test convenience functions."""
 
-    def test_initialize_graph_state_function(self, simple_graph_config, rng_key):
+    def test_initialize_graph_state_function(self, simple_graph_structure, rng_key):
         """Test that initialize_graph_state convenience function works correctly."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 784))
         y = jax.random.normal(rng_key, (batch_size, 10))
         clamps = {"input": x, "output": y}
 
-        # Use the convenience function
+        # Use the convenience function (defaults to structure config)
         state = initialize_graph_state(
             structure, batch_size, rng_key, clamps=clamps, params=params
         )
@@ -403,26 +365,25 @@ class TestConvenienceFunctions:
 
 
 class TestCustomStateInit:
-    """Test custom state initializer registration."""
+    """Test custom state initializer via subclassing."""
 
-    def test_register_custom_state_init(self, simple_graph_config, rng_key):
-        """Test registering and using a custom state initializer."""
+    def test_custom_state_init_subclass(self, simple_graph_structure, rng_key):
+        """Test creating and using a custom state initializer by subclassing."""
+        from fabricpc.core.types import GraphState, NodeState
 
-        @register_state_init("test_custom_state")
-        class TestCustomStateInit(StateInitBase):
-            CONFIG_SCHEMA = {"fill_value": {"type": (int, float), "default": 99.0}}
+        class ConstantFillStateInit(StateInitBase):
+            def __init__(self, fill_value=99.0):
+                super().__init__(fill_value=fill_value)
 
             @staticmethod
             def initialize_state(
                 structure, batch_size, rng_key, clamps, config, params=None
             ):
-                from fabricpc.core.types import GraphState, NodeState
-
                 fill_value = config.get("fill_value", 99.0)
                 node_state_dict = {}
 
-                for node_name, node_info in structure.nodes.items():
-                    shape = (batch_size, *node_info.shape)
+                for node_name, node in structure.nodes.items():
+                    shape = (batch_size, *node.node_info.shape)
 
                     if node_name in clamps:
                         z_latent = clamps[node_name]
@@ -441,33 +402,28 @@ class TestCustomStateInit:
 
                 return GraphState(nodes=node_state_dict, batch_size=batch_size)
 
-        try:
-            # Verify registration
-            assert "test_custom_state" in list_state_init_types()
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
-            params, structure = create_pc_graph(simple_graph_config, rng_key)
+        batch_size = 2
+        x = jax.random.normal(rng_key, (batch_size, 784))
+        y = jax.random.normal(rng_key, (batch_size, 10))
+        clamps = {"input": x, "output": y}
 
-            batch_size = 2
-            x = jax.random.normal(rng_key, (batch_size, 784))
-            y = jax.random.normal(rng_key, (batch_size, 10))
-            clamps = {"input": x, "output": y}
+        state = initialize_graph_state(
+            structure,
+            batch_size,
+            rng_key,
+            clamps,
+            state_init=ConstantFillStateInit(fill_value=42.0),
+        )
 
-            state = initialize_graph_state(
-                structure,
-                batch_size,
-                rng_key,
-                clamps,
-                state_init_config={"type": "test_custom_state", "fill_value": 42.0},
-            )
+        # Hidden should be filled with 42.0
+        assert jnp.all(state.nodes["hidden"].z_latent == 42.0)
 
-            # Hidden should be filled with 42.0
-            assert jnp.all(state.nodes["hidden"].z_latent == 42.0)
-
-            # Clamped nodes should have clamped values
-            assert jnp.allclose(state.nodes["input"].z_latent, x)
-            assert jnp.allclose(state.nodes["output"].z_latent, y)
-        finally:
-            unregister_state_init("test_custom_state")
+        # Clamped nodes should have clamped values
+        assert jnp.allclose(state.nodes["input"].z_latent, x)
+        assert jnp.allclose(state.nodes["output"].z_latent, y)
 
 
 class TestFeedforwardZeroError:
@@ -476,37 +432,22 @@ class TestFeedforwardZeroError:
     def test_feedforward_zero_error_mlp(self, rng_key):
         """Test that feedforward init produces zero error for MLP architecture."""
         # Create a 4-layer MLP
-        config = {
-            "node_list": [
-                {"name": "input", "shape": (32,), "type": "linear"},
-                {
-                    "name": "h1",
-                    "shape": (64,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {
-                    "name": "h2",
-                    "shape": (32,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {
-                    "name": "output",
-                    "shape": (10,),
-                    "type": "linear",
-                    "activation": {"type": "softmax"},
-                },
-            ],
-            "edge_list": [
-                {"source_name": "input", "target_name": "h1", "slot": "in"},
-                {"source_name": "h1", "target_name": "h2", "slot": "in"},
-                {"source_name": "h2", "target_name": "output", "slot": "in"},
-            ],
-            "task_map": {"x": "input", "y": "output"},
-        }
+        input_node = Linear(shape=(32,), name="input")
+        h1_node = Linear(shape=(64,), activation=ReLUActivation(), name="h1")
+        h2_node = Linear(shape=(32,), activation=ReLUActivation(), name="h2")
+        output_node = Linear(shape=(10,), activation=SoftmaxActivation(), name="output")
 
-        params, structure = create_pc_graph(config, rng_key)
+        structure = graph(
+            nodes=[input_node, h1_node, h2_node, output_node],
+            edges=[
+                Edge(source=input_node, target=h1_node.slot("in")),
+                Edge(source=h1_node, target=h2_node.slot("in")),
+                Edge(source=h2_node, target=output_node.slot("in")),
+            ],
+            task_map=TaskMap(x=input_node, y=output_node),
+        )
+
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 32))
@@ -517,7 +458,7 @@ class TestFeedforwardZeroError:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -542,52 +483,47 @@ class TestFeedforwardZeroError:
         embed_dim = 16
         vocab_size = 10
 
-        config = {
-            "node_list": [
-                {
-                    "name": "input",
-                    "shape": (seq_len, vocab_size),
-                    "type": "linear",
-                    "activation": {"type": "identity"},
-                },
-                {
-                    "name": "embed",
-                    "shape": (seq_len, embed_dim),
-                    "type": "linear",
-                    "activation": {"type": "identity"},
-                },
-                {
-                    "name": "mask",
-                    "shape": (1, seq_len, seq_len),
-                    "type": "linear",
-                    "activation": {"type": "identity"},
-                },
-                {
-                    "name": "transformer_0",
-                    "shape": (seq_len, embed_dim),
-                    "type": "transformer_block",
-                    "num_heads": 2,
-                    "ff_dim": 32,
-                    "internal_activation": {"type": "gelu"},
-                    "rope_theta": 100.0,
-                },
-                {
-                    "name": "output",
-                    "shape": (seq_len, vocab_size),
-                    "type": "linear",
-                    "activation": {"type": "softmax"},
-                },
-            ],
-            "edge_list": [
-                {"source_name": "input", "target_name": "embed", "slot": "in"},
-                {"source_name": "embed", "target_name": "transformer_0", "slot": "in"},
-                {"source_name": "mask", "target_name": "transformer_0", "slot": "mask"},
-                {"source_name": "transformer_0", "target_name": "output", "slot": "in"},
-            ],
-            "task_map": {"x": "input", "y": "output", "causal_mask": "mask"},
-        }
+        input_node = Linear(
+            shape=(seq_len, vocab_size),
+            activation=IdentityActivation(),
+            name="input",
+        )
+        embed_node = Linear(
+            shape=(seq_len, embed_dim),
+            activation=IdentityActivation(),
+            name="embed",
+        )
+        mask_node = Linear(
+            shape=(1, seq_len, seq_len),
+            activation=IdentityActivation(),
+            name="mask",
+        )
+        transformer_node = TransformerBlock(
+            shape=(seq_len, embed_dim),
+            num_heads=2,
+            ff_dim=32,
+            internal_activation=GeluActivation(),
+            rope_theta=100.0,
+            name="transformer_0",
+        )
+        output_node = Linear(
+            shape=(seq_len, vocab_size),
+            activation=SoftmaxActivation(),
+            name="output",
+        )
 
-        params, structure = create_pc_graph(config, rng_key)
+        structure = graph(
+            nodes=[input_node, embed_node, mask_node, transformer_node, output_node],
+            edges=[
+                Edge(source=input_node, target=embed_node.slot("in")),
+                Edge(source=embed_node, target=transformer_node.slot("in")),
+                Edge(source=mask_node, target=transformer_node.slot("mask")),
+                Edge(source=transformer_node, target=output_node.slot("in")),
+            ],
+            task_map=TaskMap(x=input_node, y=output_node, causal_mask=mask_node),
+        )
+
+        params = initialize_params(structure, rng_key)
 
         batch_size = 2
         # Create one-hot input
@@ -605,7 +541,7 @@ class TestFeedforwardZeroError:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -632,25 +568,20 @@ class TestFeedforwardZeroError:
         """
         from fabricpc.core.inference import run_inference
 
-        config = {
-            "node_list": [
-                {"name": "input", "shape": (16,), "type": "linear"},
-                {
-                    "name": "hidden",
-                    "shape": (32,),
-                    "type": "linear",
-                    "activation": {"type": "relu"},
-                },
-                {"name": "output", "shape": (8,), "type": "linear"},
-            ],
-            "edge_list": [
-                {"source_name": "input", "target_name": "hidden", "slot": "in"},
-                {"source_name": "hidden", "target_name": "output", "slot": "in"},
-            ],
-            "task_map": {"x": "input", "y": "output"},
-        }
+        input_node = Linear(shape=(16,), name="input")
+        hidden_node = Linear(shape=(32,), activation=ReLUActivation(), name="hidden")
+        output_node = Linear(shape=(8,), name="output")
 
-        params, structure = create_pc_graph(config, rng_key)
+        structure = graph(
+            nodes=[input_node, hidden_node, output_node],
+            edges=[
+                Edge(source=input_node, target=hidden_node.slot("in")),
+                Edge(source=hidden_node, target=output_node.slot("in")),
+            ],
+            task_map=TaskMap(x=input_node, y=output_node),
+        )
+
+        params = initialize_params(structure, rng_key)
 
         batch_size = 2
         x = jax.random.normal(rng_key, (batch_size, 16))
@@ -661,7 +592,7 @@ class TestFeedforwardZeroError:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 
@@ -688,9 +619,10 @@ class TestFeedforwardZeroError:
 class TestStateInitDeterminism:
     """Test that state initialization is deterministic."""
 
-    def test_distribution_init_deterministic(self, simple_graph_config, rng_key):
+    def test_distribution_init_deterministic(self, simple_graph_structure, rng_key):
         """Test distribution init is deterministic with same key."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         clamps = {}
@@ -700,14 +632,14 @@ class TestStateInitDeterminism:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "node_distribution"},
+            state_init=NodeDistributionStateInit(),
         )
         state2 = initialize_graph_state(
             structure,
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "node_distribution"},
+            state_init=NodeDistributionStateInit(),
         )
 
         # Should produce identical results
@@ -715,9 +647,10 @@ class TestStateInitDeterminism:
             state1.nodes["hidden"].z_latent, state2.nodes["hidden"].z_latent
         )
 
-    def test_feedforward_init_deterministic(self, simple_graph_config, rng_key):
+    def test_feedforward_init_deterministic(self, simple_graph_structure, rng_key):
         """Test feedforward init is deterministic with same key."""
-        params, structure = create_pc_graph(simple_graph_config, rng_key)
+        structure = simple_graph_structure
+        params = initialize_params(structure, rng_key)
 
         batch_size = 4
         x = jax.random.normal(rng_key, (batch_size, 784))
@@ -729,7 +662,7 @@ class TestStateInitDeterminism:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
         state2 = initialize_graph_state(
@@ -737,7 +670,7 @@ class TestStateInitDeterminism:
             batch_size,
             rng_key,
             clamps,
-            state_init_config={"type": "feedforward"},
+            state_init=FeedforwardStateInit(),
             params=params,
         )
 

@@ -3,64 +3,27 @@ Graph state initialization strategies for predictive coding networks.
 
 This module provides:
 - StateInitBase abstract class for graph-level state initialization
-- Built-in strategies (Distribution, Feedforward)
-- TODO add uPC initialization class
-- Registry with decorator-based registration for custom strategies
-- Entry point discovery for external packages
+- Built-in strategies (Global, NodeDistribution, Feedforward)
+- initialize_graph_state() convenience function
 
 State initializers determine how latent states are initialized across
 the entire graph before inference begins.
 
-User Extensibility
-------------------
-Users can register custom state initializers in two ways:
+Usage:
+    from fabricpc.graph.state_initializer import FeedforwardStateInit
 
-1. **Decorator-based registration** (recommended for development):
-
-    @register_state_init("my_strategy")
-    class MyStateInit(StateInitBase):
-        CONFIG_SCHEMA = {"param": {"type": float, "default": 1.0}}
-
-        @staticmethod
-        def initialize_state(structure, batch_size, rng_key, clamps, config, params=None):
-            # Custom initialization logic
-            ...
-
-2. **Entry point discovery** (recommended for distribution):
-
-    Add to pyproject.toml:
-        [project.entry-points."fabricpc.state_initializers"]
-        my_strategy = "my_package.state_init:MyStateInit"
-
-Configuration
--------------
-State initializers are configured via graph config:
-
-    {
-        "node_list": [...],
-        "edge_list": [...],
-        "graph_state_initializer": {
-            "type": "feedforward",
-        }
-    }
-
-Node-level overrides can be specified in node config:
-
-    {
-        "name": "hidden",
-        "shape": (256,),
-        "type": "linear",
-        "latent_init": {"type": "uniform", "min": -0.5, "max": 0.5}
-    }
+    structure = graph(
+        nodes=[...], edges=[...], task_map=...,
+        graph_state_initializer=FeedforwardStateInit(),
+    )
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Type, List
+from typing import Dict, Any
 
 import jax
 import jax.numpy as jnp
 
-from fabricpc.core.registry import Registry, RegistrationError, validate_config_schema
 from fabricpc.core.types import (
     GraphState,
     GraphStructure,
@@ -80,30 +43,21 @@ class StateInitBase(ABC):
     State initializers determine how latent states are initialized across
     the entire graph before inference begins.
 
-    All methods are static for JAX compatibility (pure functions, no state).
+    Custom state initializers extend this class:
 
-    Required methods:
-        - initialize_state(): Initialize graph state
-
-    Required attributes:
-        - CONFIG_SCHEMA: dict specifying configuration validation
-
-    Example implementation:
-        @register_state_init("my_strategy")
-        class MyStateInit(StateInitBase):
-            CONFIG_SCHEMA = {
-                "scale": {"type": float, "default": 1.0}
-            }
+        class MyInit(StateInitBase):
+            def __init__(self, fill_value=0.0):
+                super().__init__(fill_value=fill_value)
 
             @staticmethod
             def initialize_state(structure, batch_size, rng_key, clamps, config, params=None):
-                # Custom initialization logic
                 ...
+
+    All computation methods are static for JAX compatibility (pure functions, no state).
     """
 
-    # CONFIG_SCHEMA is required - subclasses must define it
-    # Use empty dict {} if no additional config parameters are needed
-    CONFIG_SCHEMA: Dict[str, Dict[str, Any]]
+    def __init__(self, **config):
+        self.config = config
 
     @staticmethod
     @abstractmethod
@@ -123,7 +77,7 @@ class StateInitBase(ABC):
             batch_size: Batch size
             rng_key: JAX random key
             clamps: Dictionary of clamped values, keyed on node names
-            config: State initialization configuration
+            config: State initialization configuration (from instance .config)
             params: GraphParams (may be required for some strategies)
 
         Returns:
@@ -133,148 +87,23 @@ class StateInitBase(ABC):
 
 
 # =============================================================================
-# State Initializer Registry
-# =============================================================================
-
-
-class StateInitRegistrationError(RegistrationError):
-    """Raised when state initializer registration fails."""
-
-    pass
-
-
-# Create the state initializer registry instance
-_state_init_registry = Registry(
-    name="state_init",
-    entry_point_group="fabricpc.state_initializers",
-    required_attrs=["CONFIG_SCHEMA"],
-    required_methods=["initialize_state"],
-    attr_validators={
-        "CONFIG_SCHEMA": validate_config_schema,
-    },
-)
-_state_init_registry.set_error_class(StateInitRegistrationError)
-
-
-def register_state_init(init_type: str):
-    """
-    Decorator to register a state initializer with the registry.
-
-    Usage:
-        @register_state_init("distribution")
-        class GlobalStateInit(StateInitBase):
-            ...
-
-    Args:
-        init_type: Unique identifier for this state init type (case-insensitive)
-
-    Returns:
-        Decorator function
-
-    Raises:
-        StateInitRegistrationError: If registration fails (duplicate, missing methods)
-    """
-    return _state_init_registry.register(init_type)
-
-
-def get_state_init_class(init_type: str) -> Type[StateInitBase]:
-    """
-    Get a state initializer class by its registered type name.
-
-    Args:
-        init_type: The registered state init type (case-insensitive)
-
-    Returns:
-        The state initializer class
-
-    Raises:
-        ValueError: If state init type is not registered
-    """
-    return _state_init_registry.get(init_type)
-
-
-def list_state_init_types() -> List[str]:
-    """Return list of all registered state init types."""
-    return _state_init_registry.list_types()
-
-
-def unregister_state_init(init_type: str) -> None:
-    """
-    Remove a state init type from the registry.
-    Primarily for testing purposes.
-
-    Args:
-        init_type: The state init type to unregister (case-insensitive)
-    """
-    _state_init_registry.unregister(init_type)
-
-
-def clear_state_init_registry() -> None:
-    """Clear all registrations. For testing only."""
-    _state_init_registry.clear()
-
-
-def validate_state_init_config(
-    state_init_class: Type[StateInitBase], config: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    Validate and apply defaults from state_init's CONFIG_SCHEMA.
-
-    Args:
-        state_init_class: The state init class with CONFIG_SCHEMA
-        config: The user-provided config dict
-
-    Returns:
-        Config dict with defaults applied
-
-    Raises:
-        ConfigValidationError: If required fields are missing or validation fails
-    """
-    from fabricpc.core.config import validate_config
-
-    schema = getattr(state_init_class, "CONFIG_SCHEMA", None)
-    init_type = config.get("type", "unknown") if config else "unknown"
-    return validate_config(schema, config, context=f"state_init '{init_type}'")
-
-
-def discover_external_state_inits() -> None:
-    """
-    Discover and register state initializers from installed packages via entry points.
-
-    Looks for packages with entry points in the "fabricpc.state_initializers" group.
-    Each entry point should map a state init type name to a StateInitBase subclass.
-
-    Example pyproject.toml for an external package:
-        [project.entry-points."fabricpc.state_initializers"]
-        custom_init = "my_package.state_init:CustomStateInit"
-    """
-    _state_init_registry.discover_external()
-
-
-# =============================================================================
 # Built-in State Initialization Strategies
 # =============================================================================
 
 
-@register_state_init("global")
 class GlobalStateInit(StateInitBase):
     """
     Initialize states from a distribution.
     Each node's state is initialized using a graph-level initializer applied to all nodes.
     Processes nodes independently (no dependencies between nodes).
 
-    Config options:
-        - initializer: Global initializer config for all nodes
-                              (default: {"type": "normal", "mean": 0.0, "std": 0.05})
+    Args:
+        initializer: InitializerBase instance for all nodes
+                     (default: NormalInitializer(mean=0.0, std=0.05))
     """
 
-    CONFIG_SCHEMA = {
-        "initializer": {
-            "type": dict,
-            "default": {"type": "normal", "mean": 0.0, "std": 0.05},
-            "description": "Global initializer config for all nodes, any type supported by fabricpc.core.initializers.initialize",
-        },
-    }
+    def __init__(self, initializer=None):
+        super().__init__(initializer=initializer)
 
     @staticmethod
     def initialize_state(
@@ -286,9 +115,11 @@ class GlobalStateInit(StateInitBase):
         params: GraphParams = None,
     ) -> GraphState:
         """Initialize states from a distribution."""
-        from fabricpc.core.initializers import initialize
+        from fabricpc.core.initializers import initialize, NormalInitializer
 
-        global_init_config = config["initializer"]
+        global_init_config = config.get("initializer", None)
+        if global_init_config is None:
+            global_init_config = NormalInitializer(mean=0.0, std=0.05)
 
         node_names = list(structure.nodes.keys())
         node_keys = jax.random.split(rng_key, len(node_names))
@@ -296,7 +127,8 @@ class GlobalStateInit(StateInitBase):
 
         node_state_dict = {}
 
-        for node_name, node_info in structure.nodes.items():
+        for node_name, node in structure.nodes.items():
+            node_info = node.node_info
             shape = (batch_size, *node_info.shape)
 
             if node_name in clamps:
@@ -319,18 +151,15 @@ class GlobalStateInit(StateInitBase):
         return GraphState(nodes=node_state_dict, batch_size=batch_size)
 
 
-@register_state_init("node_distribution")
 class NodeDistributionStateInit(StateInitBase):
     """
     Initialize states from a distribution using node level configs for initializer.
-    Each node's state is initialized using its specified Initializer.
+    Each node's state is initialized using its configured latent_init.
     Processes nodes independently (no dependencies between nodes).
-
-    Config options:
-    none
     """
 
-    CONFIG_SCHEMA = {}  # No additional config options
+    def __init__(self):
+        super().__init__()
 
     @staticmethod
     def initialize_state(
@@ -350,14 +179,15 @@ class NodeDistributionStateInit(StateInitBase):
 
         node_state_dict = {}
 
-        for node_name, node_info in structure.nodes.items():
+        for node_name, node in structure.nodes.items():
+            node_info = node.node_info
             shape = (batch_size, *node_info.shape)
 
             if node_name in clamps:
                 z_latent = clamps[node_name]
             else:
-                node_init_config = node_info.node_config["latent_init"]
-                z_latent = initialize(node_key_map[node_name], shape, node_init_config)
+                latent_init = node_info.latent_init
+                z_latent = initialize(node_key_map[node_name], shape, latent_init)
 
             node_state_dict[node_name] = NodeState(
                 z_latent=z_latent,
@@ -372,7 +202,6 @@ class NodeDistributionStateInit(StateInitBase):
         return GraphState(nodes=node_state_dict, batch_size=batch_size)
 
 
-@register_state_init("feedforward")
 class FeedforwardStateInit(StateInitBase):
     """
     Initialize states via feedforward propagation through the network.
@@ -383,12 +212,10 @@ class FeedforwardStateInit(StateInitBase):
     4. Clamps override computed values
 
     Requires params to be provided to compute projections.
-
-    Config options:
-    none
     """
 
-    CONFIG_SCHEMA = {}  # No additional config options
+    def __init__(self):
+        super().__init__()
 
     @staticmethod
     def initialize_state(
@@ -402,7 +229,6 @@ class FeedforwardStateInit(StateInitBase):
         """Initialize states via feedforward propagation."""
         from fabricpc.core.initializers import initialize
         from fabricpc.core.inference import gather_inputs
-        from fabricpc.nodes import get_node_class
 
         if params is None:
             raise ValueError("FeedforwardStateInit requires params to be provided")
@@ -413,14 +239,15 @@ class FeedforwardStateInit(StateInitBase):
 
         # First pass: initialize all nodes with clamps or fallback in case of graph cycles
         node_state_dict = {}
-        for node_name, node_info in structure.nodes.items():
+        for node_name, node in structure.nodes.items():
+            node_info = node.node_info
             shape = (batch_size, *node_info.shape)
 
             if node_name in clamps:
                 z_latent = clamps[node_name]
             else:
-                fallback_config = node_info.node_config["latent_init"]
-                z_latent = initialize(node_key_map[node_name], shape, fallback_config)
+                latent_init = node_info.latent_init
+                z_latent = initialize(node_key_map[node_name], shape, latent_init)
 
             node_state_dict[node_name] = NodeState(
                 z_latent=z_latent,
@@ -436,12 +263,13 @@ class FeedforwardStateInit(StateInitBase):
 
         # Second pass: feedforward propagation in topological order
         for node_name in structure.node_order:
-            node_info = structure.nodes[node_name]
+            node = structure.nodes[node_name]
+            node_info = node.node_info
 
             if node_info.in_degree > 0:
                 node_state = state.nodes[node_name]
                 node_params = params.nodes[node_name]
-                node_class = get_node_class(node_info.node_type)
+                node_class = node_info.node_class
                 edge_inputs = gather_inputs(node_info, structure, state)
 
                 _, projected = node_class.forward(
@@ -481,7 +309,7 @@ def initialize_graph_state(
     batch_size: int,
     rng_key: jax.Array,
     clamps: Dict[str, jnp.ndarray] = None,
-    state_init_config: Dict[str, Any] = None,
+    state_init: StateInitBase = None,
     params: GraphParams = None,
 ) -> GraphState:
     """
@@ -492,7 +320,7 @@ def initialize_graph_state(
         batch_size: Batch size
         rng_key: JAX random key
         clamps: Dictionary of clamped values
-        state_init_config: State initialization config with "type" for a StateInitBase like object.
+        state_init: StateInitBase instance (default: from structure config)
         params: GraphParams (required for feedforward init)
 
     Returns:
@@ -501,24 +329,15 @@ def initialize_graph_state(
     Example:
         state = initialize_graph_state(
             structure, batch_size, key, clamps,
-            {"type": "feedforward", "fallback": {"type": "zeros"}},
+            state_init=FeedforwardStateInit(),
             params=params
         )
     """
     clamps = clamps or {}
 
-    if state_init_config is None:
-        state_init_config = structure.config["graph_state_initializer"]
+    if state_init is None:
+        state_init = structure.config["graph_state_initializer"]
 
-    init_type = state_init_config["type"]
-    init_class = get_state_init_class(init_type)
-
-    validated_config = validate_state_init_config(init_class, state_init_config)
-
-    return init_class.initialize_state(
-        structure, batch_size, rng_key, clamps, validated_config, params
+    return type(state_init).initialize_state(
+        structure, batch_size, rng_key, clamps, state_init.config, params
     )
-
-
-# Auto-discover external state initializers on import
-discover_external_state_inits()

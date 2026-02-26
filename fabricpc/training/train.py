@@ -56,7 +56,6 @@ def get_graph_param_gradient(
         batch_size,
         rng_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
 
@@ -70,7 +69,7 @@ def get_graph_param_gradient(
         [
             sum(final_state.nodes[node_name].energy)
             for node_name in structure.nodes
-            if structure.nodes[node_name].in_degree > 0
+            if structure.nodes[node_name].node_info.in_degree > 0
         ]
     )
 
@@ -162,7 +161,7 @@ def train_pcn(
     Example:
         >>> rng_key = jax.random.PRNGKey(0)
         >>> params_key, train_key = jax.random.split(rng_key, 2)
-        >>> params, structure = create_pc_graph(model_config, params_key)
+        >>> params = initialize_params(structure, params_key)
         >>> train_config = {
         ...     "optimizer": {"type": "adam", "lr": 1e-3},
         ...     "num_epochs": 10,
@@ -289,7 +288,6 @@ def eval_step(
         batch_size,
         rng_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
 

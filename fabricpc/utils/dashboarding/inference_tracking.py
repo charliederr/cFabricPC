@@ -210,7 +210,6 @@ def train_step_with_history(
         batch_size,
         rng_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
 
@@ -219,13 +218,9 @@ def train_step_with_history(
         params, init_state, clamps, structure, infer_steps, eta_infer, collect_every
     )
 
-    # Compute energy (ignore source nodes)
+    # Compute energy
     energy = sum(
-        [
-            jnp.sum(final_state.nodes[node_name].energy)
-            for node_name in structure.nodes
-            if structure.nodes[node_name].in_degree > 0
-        ]
+        [jnp.sum(final_state.nodes[node_name].energy) for node_name in structure.nodes]
     )
 
     # Compute gradients and update

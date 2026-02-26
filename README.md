@@ -27,6 +27,8 @@ There are various flavors of PC. FabricPC provides a graph-based implementation 
 - Extensibility for research
  
 ## Quick Start
+
+Create a virtual environement with python 3.12.x (higher versions may not work with Aim experiment tracking)
 ```bash
 # Install in editable mode (recommended for development, and running examples)
 pip install -e ".[dev,tfds,viz]"
@@ -63,93 +65,32 @@ This is a research-first project.
 ## License:
 Private until officially released. Please do not distribute.
 
+## Building a model
+A model consists of structure and parameters.
+```python
+from fabricpc.nodes import Linear
+from fabricpc.builder import Edge, TaskMap, graph
+from fabricpc.graph import initialize_params
+
+layer1 = Linear(shape=(784,), name="input")
+layer2 = Linear(shape=(256,), name="hidden")
+layer3 = Linear(shape=(10,), name="output")
+
+structure = graph(
+  nodes=[layer1, layer2, layer3],
+  edges=[Edge(layer1, layer2.slot("in")), Edge(layer2, layer3.slot("in"))],
+  task_map=TaskMap(x=layer1, y=layer3),
+)
+params = initialize_params(structure, rng_key)
+```
+
 ## Extending FabricPC
 
 ### Custom Nodes
 
 Create custom node types by subclassing `NodeBase`:
 
-```python
-from fabricpc.nodes import NodeBase, SlotSpec, register_node
-from fabricpc.core.types import NodeParams
-
-@register_node("my_node")  # Decorator to register node type
-class MyNode(NodeBase):
-    # Required: config schema for node-specific parameters
-    CONFIG_SCHEMA = {
-        "kernel_size": {"type": tuple, "required": True, "description": "Kernel dimensions"},
-        "stride": {"type": tuple, "default": (1, 1)},
-        "use_bias": {"type": bool, "default": True},
-    }
-
-    # Optional: override default energy/activation
-    DEFAULT_ENERGY_CONFIG = {"type": "gaussian"}
-    DEFAULT_ACTIVATION_CONFIG = {"type": "relu"}
-
-    @staticmethod
-    def get_slots():
-        return {"in": SlotSpec(name="in", is_multi_input=True)}
-
-    @staticmethod
-    def initialize_params(key, node_shape, input_shapes, config):
-        # Initialize weights/biases for each input edge
-        weights, biases = {}, {}
-        for edge_key, in_shape in input_shapes.items():
-            # ... initialize parameters
-            pass
-        return NodeParams(weights=weights, biases=biases)
-
-    @staticmethod
-    def forward(params, inputs, state, node_info):
-        # Compute forward pass, return (energy, updated_state)
-        pass
-```
-
-**Required methods:**
-- `get_slots()`: Define input slots (single or multi-input)
-- `initialize_params()`: Create weight/bias parameters
-- `forward()`: Compute forward pass and energy
-
-**Registration decorators by base class:**
-| Base Class | Decorator | Import |
-|------------|-----------|--------|
-| `NodeBase` | `@register_node("my_node")` | `from fabricpc.nodes import register_node` |
-| `EnergyFunctional` | `@register_energy("custom_energy")` | `from fabricpc.core.energy import register_energy` |
-| `ActivationBase` | `@register_activation("custom_activation")` | `from fabricpc.core.activations import register_activation` |
-
-**Required class attributes:**
-- `CONFIG_SCHEMA`: Dict defining node parameters with types, defaults, and validation
-
-**Schema field options:**
-```python
-{
-    "field_name": {
-        "type": int,              # Required: int, float, str, tuple, dict, list, bool
-        "required": True,         # Field must be provided (no default)
-        "default": 10,            # Default value if not provided
-        "choices": ["a", "b"],    # Allowed values
-        "description": "...",     # Documentation
-    }
-}
-```
-
 See `examples/custom_node.py` for a complete Conv2D implementation.
-
-### External Package Registration
-
-External packages can register extensions via entry points instead of decorators (auto-discovered on import):
-
-**`pyproject.toml`:**
-```toml
-[project.entry-points."fabricpc.nodes"]
-myconv2d = "my_package.nodes:MyConv2DNode"
-
-[project.entry-points."fabricpc.energies"]
-custom_energy = "my_package.energy:CustomEnergy"
-
-[project.entry-points."fabricpc.activations"]
-custom_act = "my_package.activations:CustomActivation"
-```
 
 ## Shape Conventions
 
@@ -160,8 +101,6 @@ custom_act = "my_package.activations:CustomActivation"
  - 1D Conv: shape=(seq_len, channels) - e.g., (100, 32) for 100 timesteps, 32 channels
  - 2D Conv: shape=(H, W, C) - e.g., (28, 28, 64) for 28x28 image, 64 channels (NHWC)
  - 3D Conv: shape=(D, H, W, C) - e.g., (32, 32, 32, 16) for 3D volume
-
-Linear nodes flatten their inputs for transformation and then reshape their outputs to the specified shape.
 
 Conv Node Shape Flow (Future Reference)
 

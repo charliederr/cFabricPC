@@ -22,7 +22,6 @@ import optax
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure, NodeParams
 from fabricpc.core.inference import run_inference, gather_inputs
 from fabricpc.graph.state_initializer import initialize_graph_state
-from fabricpc.nodes import get_node_class
 
 
 def create_causal_mask(seq_len: int) -> jnp.ndarray:
@@ -93,13 +92,14 @@ def compute_local_weight_gradients_ar(
     """
     gradients = {}
 
-    for node_name, node_info in structure.nodes.items():
+    for node_name, node in structure.nodes.items():
+        node_info = node.node_info
         if node_info.in_degree == 0:
             gradients[node_name] = NodeParams(weights={}, biases={})
             continue
 
         in_edges_data = gather_inputs(node_info, structure, final_state)
-        node_class = get_node_class(node_info.node_type)
+        node_class = node_info.node_class
 
         # Compute local gradients
         node_state, grad_params = node_class.forward_learning(
@@ -182,7 +182,6 @@ def train_step_autoregressive(
         batch_size,
         rng_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
 
@@ -193,8 +192,8 @@ def train_step_autoregressive(
 
     # Compute total energy (sum over non-source nodes)
     energy = jnp.array(0.0)
-    for node_name, node_info in structure.nodes.items():
-        if node_info.in_degree > 0:
+    for node_name, node in structure.nodes.items():
+        if node.node_info.in_degree > 0:
             energy = energy + jnp.sum(final_state.nodes[node_name].energy)
 
     avg_energy = energy / batch_size
@@ -383,7 +382,6 @@ def _generation_step(
         batch_size,
         init_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
     if infer_steps > 0:
@@ -492,8 +490,8 @@ def generate_autoregressive(
     if input_node is None or output_node is None:
         raise ValueError("Structure must have 'x' and 'y' in task_map")
 
-    vocab_size = structure.nodes[output_node].shape[-1]
-    seq_len = structure.nodes[input_node].shape[0]
+    vocab_size = structure.nodes[output_node].node_info.shape[-1]
+    seq_len = structure.nodes[input_node].node_info.shape[0]
 
     # Prepare initial context window (pad or truncate prompt to seq_len)
     if prompt_len >= seq_len:
@@ -593,7 +591,6 @@ def _eval_step_autoregressive(
         batch_size,
         rng_key,
         clamps=clamps,
-        state_init_config=structure.config["graph_state_initializer"],
         params=params,
     )
     if infer_steps > 0:
