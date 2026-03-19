@@ -3,15 +3,22 @@
 # We experiment with a sequence of block nodes and compare to backprop.
 # Then we progressively break down the block node into its components for a fully-PC approach: multi-head attention, feedforward, layer norm, residual connections
 
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 
 from fabricpc.nodes.base import NodeBase, NodeParams, SlotSpec
 from fabricpc.core.activations import IdentityActivation, GeluActivation
 from fabricpc.core.energy import GaussianEnergy
-from fabricpc.core.initializers import NormalInitializer
+from fabricpc.core.initializers import NormalInitializer, KaimingInitializer, initialize
 from fabricpc.core.types import NodeState, NodeInfo
-from typing import Dict, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fabricpc.core.activations import ActivationBase
+    from fabricpc.core.energy import EnergyFunctional
+    from fabricpc.core.initializers import InitializerBase
 
 # =============================================================================
 # Rotary Position Embeddings (RoPE)
@@ -127,25 +134,21 @@ class TransformerBlock(NodeBase):
         weight_init: InitializerBase for weights
     """
 
-    DEFAULT_ACTIVATION = IdentityActivation
-    DEFAULT_ENERGY = GaussianEnergy
-    DEFAULT_LATENT_INIT = NormalInitializer
-
     def __init__(
         self,
-        shape,
-        name,
-        activation=None,
-        energy=None,
-        internal_activation=None,
-        num_heads=8,
-        ff_dim=None,
-        dropout_rate=0.0,
-        pre_norm=True,
-        use_rope=True,
-        rope_theta=10000.0,
-        weight_init=None,
-        latent_init=None,
+        shape: Tuple[int, ...],
+        name: str,
+        activation: Optional[ActivationBase] = IdentityActivation(),
+        energy: Optional[EnergyFunctional] = GaussianEnergy(),
+        internal_activation: Optional[ActivationBase] = None,
+        num_heads: int = 8,
+        ff_dim: Optional[int] = None,
+        dropout_rate: float = 0.0,
+        pre_norm: bool = True,
+        use_rope: bool = True,
+        rope_theta: float = 10000.0,
+        weight_init: Optional[InitializerBase] = KaimingInitializer(),
+        latent_init: Optional[InitializerBase] = NormalInitializer(),
     ):
         super().__init__(
             shape=shape,
@@ -153,6 +156,7 @@ class TransformerBlock(NodeBase):
             activation=activation,
             energy=energy,
             latent_init=latent_init,
+            weight_init=weight_init,
             internal_activation=internal_activation or GeluActivation(),
             num_heads=num_heads,
             ff_dim=ff_dim,
@@ -160,7 +164,6 @@ class TransformerBlock(NodeBase):
             pre_norm=pre_norm,
             use_rope=use_rope,
             rope_theta=rope_theta,
-            weight_init=weight_init,
         )
 
     @staticmethod
@@ -175,7 +178,8 @@ class TransformerBlock(NodeBase):
         key: jax.Array,
         node_shape: Tuple[int, ...],
         input_shapes: Dict[str, Tuple[int, ...]],
-        config: Dict[str, Any],
+        weight_init: Optional[InitializerBase] = None,
+        config: Dict[str, Any] = {},
     ) -> NodeParams:
 
         num_heads = config.get("num_heads", 8)
@@ -186,22 +190,53 @@ class TransformerBlock(NodeBase):
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
 
         keys = jax.random.split(key, 8)
-        std = 1.0 / jnp.sqrt(embed_dim)
 
+        # N = number of blocks in the architecture, used for residual stream variance control.
+        """
+        Weight      | Init std                    | Rationale
+        ------------|-----------------------------|---------------------------------
+        W_q         | 1/√d_model                  | Unit variance Q after projection
+        W_k         | 1/√d_model                  | Unit variance K after projection  
+        W_v         | 1/√d_model                  | Unit variance V after projection
+        W_o         | 1/(√d_model · √(2N))        | Residual stream variance control
+        W_ff1       | √(2/d_model)  [He]          | Compensate for ReLU/GELU zeroing
+        W_ff2       | 1/(√d_ff · √(2N))           | Residual stream variance control
+        ln*_gamma   | 1.0 (ones)                  | Identity at init
+        ln*_beta    | 0.0 (zeros)                 | No shift at init
+        all biases  | 0.0 (zeros)                 | No variance contribution at init
+        """
+
+        n_blocks = 1  # TODO - make this dynamic based on config
         return NodeParams(
             weights={
                 # Attention weights
-                "W_q": jax.random.normal(keys[0], (embed_dim, embed_dim)) * std,
-                "W_k": jax.random.normal(keys[1], (embed_dim, embed_dim)) * std,
-                "W_v": jax.random.normal(keys[2], (embed_dim, embed_dim)) * std,
-                "W_o": jax.random.normal(keys[3], (embed_dim, embed_dim)) * std,
+                "W_q": initialize(
+                    keys[0],
+                    (embed_dim, embed_dim),
+                    NormalInitializer(std=1.0 / jnp.sqrt(embed_dim)),
+                ),
+                "W_k": initialize(
+                    keys[1],
+                    (embed_dim, embed_dim),
+                    NormalInitializer(std=1.0 / jnp.sqrt(embed_dim)),
+                ),
+                "W_v": initialize(
+                    keys[2],
+                    (embed_dim, embed_dim),
+                    NormalInitializer(std=1.0 / jnp.sqrt(embed_dim)),
+                ),
+                "W_o": initialize(
+                    keys[3],
+                    (embed_dim, embed_dim),
+                    NormalInitializer(std=1.0 / jnp.sqrt(embed_dim * 2 * n_blocks)),
+                ),
                 # FFN weights
-                "W_ff1": jax.random.normal(keys[4], (embed_dim, ff_dim))
-                * std
-                * jnp.sqrt(ff_dim / embed_dim),
-                "W_ff2": jax.random.normal(keys[5], (ff_dim, embed_dim))
-                * std
-                * jnp.sqrt(ff_dim / embed_dim),
+                "W_ff1": initialize(keys[4], (embed_dim, ff_dim), KaimingInitializer()),
+                "W_ff2": initialize(
+                    keys[5],
+                    (ff_dim, embed_dim),
+                    NormalInitializer(std=1.0 / jnp.sqrt(ff_dim * 2 * n_blocks)),
+                ),
                 # LayerNorm parameters
                 "ln1_gamma": jnp.ones((1, 1, embed_dim)),
                 "ln2_gamma": jnp.ones((1, 1, embed_dim)),
@@ -255,7 +290,7 @@ class TransformerBlock(NodeBase):
         )
 
         # Multi-Head Attention
-        attn_output, substructure_attn = TransformerBlock._mha(
+        attn_output = TransformerBlock._mha(
             x_norm1,
             mask,
             num_heads,
@@ -379,11 +414,4 @@ class TransformerBlock(NodeBase):
         pre_activation = jnp.matmul(attn_output, W_o) + b_o
         projection = activation_fn(pre_activation)
 
-        substructure = {
-            "attn_matrix": attn_matrix,
-            "Q": Q,
-            "K": K,
-            "V": V,
-        }
-
-        return projection, substructure
+        return projection

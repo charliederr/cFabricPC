@@ -22,44 +22,37 @@ class TrackingConfig:
     """Configuration for what to track and when.
 
     Attributes:
-        track_batch_energy: Track energy at batch level.
-        track_batch_energy_per_node: Track per-node energy at batch level.
-        track_epoch_energy: Track average system energy at epoch level.
-        track_epoch_accuracy: Track accuracy at epoch level.
+        track_energy: Track energy (batch and epoch level).
+        track_accuracy: Track accuracy (epoch level).
         track_weight_distributions: Track weight distribution histograms.
-        track_latent_distributions: Track latent state distributions.
-        track_preactivation_distributions: Track pre-activation distributions.
-        track_activation_distributions: Track activation (z_mu) distributions.
-        track_error_statistics: Track prediction error statistics.
-        track_inference_dynamics: Track per-inference-step evolution.
-        inference_nodes_to_track: Nodes to track for inference dynamics.
-        weight_distribution_every_n_epochs: Frequency for weight tracking.
-        latent_distribution_every_n_batches: Frequency for latent tracking.
+        track_state_distributions: Track distribution histograms for z_mu,
+            z_latent, and energy. Summary stats (mean, std, norm) are always
+            collected when state tracking fires.
+        track_error: Track prediction error statistics.
+        nodes_to_track: Nodes for per-node tracking. Empty list disables
+            per-node breakdowns (energy, state, inference dynamics).
+        tracking_every_n_batches: How often (in batches) to log weight
+            distributions, state stats/distributions, and inference dynamics.
+        tracking_every_n_epochs: How often (in epochs) to log epoch-level
+            metrics such as weight distributions.
+        state_tracking_every_n_infer_steps: Within a tracked batch, how often
+            (in inference steps) to log state. Checked inside track_state().
         experiment_name: Name of the experiment in Aim.
         run_name: Name of this specific run.
     """
 
-    # Batch-level tracking
-    track_batch_energy: bool = True
-    track_batch_energy_per_node: bool = False
-
-    # Epoch-level tracking
-    track_epoch_energy: bool = True
-    track_epoch_accuracy: bool = True
+    # What to track
+    track_energy: bool = True
+    track_accuracy: bool = True
+    track_error: bool = False
     track_weight_distributions: bool = True
-    track_latent_distributions: bool = False
-    track_preactivation_distributions: bool = False
-    track_activation_distributions: bool = False
-    track_error_statistics: bool = False
-
-    # Inference dynamics tracking
-    track_inference_dynamics: bool = False
-    inference_nodes_to_track: List[str] = field(default_factory=list)
-
+    track_state_distributions: bool = False
+    # Node-level filtering (empty = no per-node breakdown)
+    nodes_to_track: List[str] = field(default_factory=list)
     # Frequency controls
-    weight_distribution_every_n_epochs: int = 1
-    latent_distribution_every_n_batches: int = 100
-
+    tracking_every_n_batches: int = 50
+    tracking_every_n_epochs: int = 1
+    state_tracking_every_n_infer_steps: int = 5
     # Naming
     experiment_name: Optional[str] = None
     run_name: Optional[str] = None
@@ -196,7 +189,7 @@ class AimExperimentTracker:
             batch: Current batch index.
             context: Optional additional context.
         """
-        if not self.config.track_batch_energy:
+        if not self.config.track_energy:
             return
         if not self._ensure_initialized():
             return
@@ -229,13 +222,16 @@ class AimExperimentTracker:
             epoch: Current epoch.
             batch: Current batch index.
         """
-        if not self.config.track_batch_energy_per_node:
+        if not self.config.nodes_to_track:
             return
         if not self._ensure_initialized():
             return
 
         energies = extract_node_energies(state)
-        for node_name, energy in energies.items():
+        for node_name in self.config.nodes_to_track:
+            if node_name not in energies:
+                continue
+            energy = energies[node_name]
             if structure.nodes[node_name].node_info.in_degree > 0:
                 mean_energy = float(np.mean(energy))
                 self._run.track(
@@ -264,8 +260,8 @@ class AimExperimentTracker:
 
         for name, value in metrics.items():
             should_track = (
-                (name == "energy" and self.config.track_epoch_energy)
-                or (name == "accuracy" and self.config.track_epoch_accuracy)
+                (name == "energy" and self.config.track_energy)
+                or (name == "accuracy" and self.config.track_accuracy)
                 or (name not in ["energy", "accuracy"])  # Track other metrics always
             )
             if should_track:
@@ -281,6 +277,7 @@ class AimExperimentTracker:
         params: GraphParams,
         structure: GraphStructure,
         epoch: int,
+        batch: int,
         nodes: Optional[List[str]] = None,
     ) -> None:
         """Track weight distributions using Aim Distribution.
@@ -289,11 +286,12 @@ class AimExperimentTracker:
             params: Current GraphParams.
             structure: GraphStructure.
             epoch: Current epoch.
+            batch: Current batch index.
             nodes: Optional list of nodes to track (default: all).
         """
         if not self.config.track_weight_distributions:
             return
-        if epoch % self.config.weight_distribution_every_n_epochs != 0:
+        if batch % self.config.tracking_every_n_batches != 0:
             return
         if not self._ensure_initialized():
             return
@@ -308,6 +306,7 @@ class AimExperimentTracker:
                 self._run.track(
                     dist,
                     name="weights",
+                    step=self._global_step,
                     epoch=epoch,
                     context={"node": node_name, "edge": edge_key},
                 )
@@ -317,28 +316,37 @@ class AimExperimentTracker:
                 self._run.track(
                     dist,
                     name="biases",
+                    step=self._global_step,
                     epoch=epoch,
                     context={"node": node_name, "key": bias_key},
                 )
 
-    def track_latent_distributions(
+    def track_state(
         self,
         state: GraphState,
         epoch: int,
         batch: int,
+        infer_step: int,
         nodes: Optional[List[str]] = None,
     ) -> None:
-        """Track latent state distributions.
+        """Track node state summary stats and optional distributions.
+
+        Always logs mean, std, and L2 norm for z_latent, z_mu, and energy.
+        Optionally logs full distribution histograms when
+        ``config.track_state_distributions`` is True.
+
+        Batch-level gating (``tracking_every_n_batches``) is the
+        responsibility of the caller.  This method only checks the
+        inference-step interval.
 
         Args:
-            state: GraphState.
+            state: GraphState after (partial) inference.
             epoch: Current epoch.
-            batch: Current batch.
-            nodes: Optional list of nodes to track.
+            batch: Current batch index.
+            infer_step: Current inference step within this batch.
+            nodes: Optional list of nodes to track (default: all).
         """
-        if not self.config.track_latent_distributions:
-            return
-        if batch % self.config.latent_distribution_every_n_batches != 0:
+        if infer_step % self.config.state_tracking_every_n_infer_steps != 0:
             return
         if not self._ensure_initialized():
             return
@@ -346,42 +354,48 @@ class AimExperimentTracker:
         aim = get_aim()
         nodes = nodes or list(state.nodes.keys())
 
+        state_vars = ("z_latent", "z_mu", "energy")
+
         for node_name in nodes:
             node_state = state.nodes[node_name]
+            ctx = {"node": node_name, "infer_step": infer_step}
 
-            # z_latent distribution
-            dist = aim.Distribution(flatten_for_distribution(node_state.z_latent))
-            self._run.track(
-                dist,
-                name="z_latent",
-                step=self._global_step,
-                epoch=epoch,
-                context={"node": node_name},
-            )
+            for var_name in state_vars:
+                data = np.asarray(getattr(node_state, var_name))
 
-            # z_mu distribution (activations)
-            if self.config.track_activation_distributions:
-                dist = aim.Distribution(flatten_for_distribution(node_state.z_mu))
+                # Always track summary statistics
                 self._run.track(
-                    dist,
-                    name="z_mu",
+                    float(np.mean(data)),
+                    name=f"{var_name}_mean",
                     step=self._global_step,
                     epoch=epoch,
-                    context={"node": node_name},
-                )
-
-            # pre_activation distribution
-            if self.config.track_preactivation_distributions:
-                dist = aim.Distribution(
-                    flatten_for_distribution(node_state.pre_activation)
+                    context=ctx,
                 )
                 self._run.track(
-                    dist,
-                    name="pre_activation",
+                    float(np.std(data)),
+                    name=f"{var_name}_std",
                     step=self._global_step,
                     epoch=epoch,
-                    context={"node": node_name},
+                    context=ctx,
                 )
+                self._run.track(
+                    float(np.linalg.norm(data)),
+                    name=f"{var_name}_norm",
+                    step=self._global_step,
+                    epoch=epoch,
+                    context=ctx,
+                )
+
+                # Optionally track full distributions
+                if self.config.track_state_distributions:
+                    dist = aim.Distribution(flatten_for_distribution(data))
+                    self._run.track(
+                        dist,
+                        name=var_name,
+                        step=self._global_step,
+                        epoch=epoch,
+                        context=ctx,
+                    )
 
     def track_inference_dynamics(
         self,
@@ -398,14 +412,11 @@ class AimExperimentTracker:
             batch: Current batch.
             nodes: Optional list of nodes to track.
         """
-        if not self.config.track_inference_dynamics:
+        nodes = nodes or self.config.nodes_to_track
+        if not nodes:
             return
         if not self._ensure_initialized():
             return
-
-        nodes = nodes or self.config.inference_nodes_to_track
-        if not nodes and state_history:
-            nodes = list(state_history[0].nodes.keys())
 
         for infer_step, state in enumerate(state_history):
             for node_name in nodes:
@@ -469,7 +480,7 @@ class StateHistoryCollector:
     Example:
         collector = StateHistoryCollector()
         final_state, history = run_inference_with_history(
-            params, init_state, clamps, structure, infer_steps, eta_infer
+            params, init_state, clamps, structure
         )
         collector.add_history(history, {"epoch": epoch, "batch": batch})
 

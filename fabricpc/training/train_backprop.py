@@ -16,6 +16,7 @@ Use cases:
 """
 
 from typing import Dict, Tuple, Any, List, Optional, Callable, cast
+import math
 import jax
 import jax.numpy as jnp
 import optax
@@ -125,6 +126,7 @@ def train_backprop(
     params: GraphParams,
     structure: GraphStructure,
     train_loader: Any,
+    optimizer: optax.GradientTransformation,
     config: dict,
     rng_key: jax.Array,
     verbose: bool = True,
@@ -141,8 +143,8 @@ def train_backprop(
         params: Initial parameters
         structure: Graph structure
         train_loader: Data loader yielding batches
+        optimizer: Optax optimizer (e.g., optax.adam(1e-3))
         config: Training configuration:
-            - optimizer: Optimizer config dict (type, lr, weight_decay)
             - num_epochs: Number of training epochs
             - loss_type: "cross_entropy" or "mse" (default: "cross_entropy")
         rng_key: JAX random key
@@ -155,26 +157,26 @@ def train_backprop(
 
     Example:
         >>> params = initialize_params(structure, rng_key)
+        >>> optimizer = optax.adam(1e-3)
         >>> train_config = {
         ...     "num_epochs": 10,
-        ...     "optimizer": {"type": "adam", "lr": 1e-3},
         ...     "loss_type": "cross_entropy",
         ... }
         >>> trained_params, losses, _ = train_backprop(
-        ...     params, structure, train_loader, train_config, rng_key
+        ...     params, structure, train_loader, optimizer, train_config, rng_key
         ... )
     """
-    from fabricpc.training.optimizers import create_optimizer
-
     validate_feedforward_init(structure)
 
-    # Create optimizer
-    optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))
     opt_state = optimizer.init(params)
 
     # Training hyperparameters
-    num_epochs = config.get("num_epochs", 10)
+    num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
     loss_type = config.get("loss_type", "cross_entropy")
+
+    # Support fractional epochs: e.g. 1.5 -> 2 loop iterations, last stops at 50%
+    total_epochs = math.ceil(num_epochs)
+    frac = num_epochs - math.floor(num_epochs)
 
     # JIT compile training step
     jit_train_step = jax.jit(
@@ -186,20 +188,31 @@ def train_backprop(
     iter_results = []
     epoch_results = []
 
-    for epoch_idx in range(num_epochs):
+    for epoch_idx in range(total_epochs):
         try:
             num_batches = len(train_loader)
         except TypeError:
             raise TypeError("train_loader must support len()")
 
-        # Split keys for batches
+        # On the final epoch, truncate if fractional
+        is_last_epoch = epoch_idx == total_epochs - 1
+        if is_last_epoch and frac > 0:
+            max_batches = round(frac * num_batches)
+        else:
+            max_batches = num_batches
+
+        # Split keys for actual batch count
         epoch_rng_key, rng_key = jax.random.split(rng_key)
-        batch_keys = jax.random.split(epoch_rng_key, num_batches)
+        batch_keys = jax.random.split(epoch_rng_key, max_batches)
 
         batch_losses = []
         epoch_loss = 0.0
+        batches_processed = 0
 
         for batch_idx, batch_data in enumerate(train_loader):
+            if batch_idx >= max_batches:
+                break
+
             # Convert batch to JAX format
             if isinstance(batch_data, dict):
                 batch = {k: jnp.array(v) for k, v in batch_data.items()}
@@ -217,6 +230,7 @@ def train_backprop(
             )
 
             epoch_loss += float(loss)
+            batches_processed += 1
 
             if iter_callback is not None:
                 batch_losses.append(iter_callback(epoch_idx, batch_idx, loss))
@@ -224,7 +238,7 @@ def train_backprop(
                 batch_losses.append(float(loss))
 
         iter_results.append(batch_losses)
-        avg_loss = epoch_loss / num_batches
+        avg_loss = epoch_loss / batches_processed if batches_processed > 0 else 0.0
 
         # Epoch callback
         if epoch_callback is not None:
@@ -235,7 +249,7 @@ def train_backprop(
             epoch_results.append(None)
 
         if verbose:
-            print(f"Epoch {epoch_idx + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch_idx + 1}/{total_epochs}, Loss: {avg_loss:.4f}")
 
     return params, iter_results, epoch_results
 
@@ -341,6 +355,7 @@ def train_backprop_autoregressive(
     params: GraphParams,
     structure: GraphStructure,
     train_loader: Any,
+    optimizer: optax.GradientTransformation,
     config: dict,
     rng_key: jax.Array,
     verbose: bool = True,
@@ -357,8 +372,8 @@ def train_backprop_autoregressive(
         params: Initial parameters
         structure: Graph structure
         train_loader: Data loader yielding batches with 'x' and 'y' keys
+        optimizer: Optax optimizer (e.g., optax.adam(1e-3))
         config: Training configuration:
-            - optimizer: Optimizer config dict
             - num_epochs: Number of training epochs
             - use_causal_mask: Whether to use causal masking (default True)
         rng_key: JAX random key
@@ -369,17 +384,17 @@ def train_backprop_autoregressive(
     Returns:
         Tuple of (trained_params, loss_history, epoch_results)
     """
-    from fabricpc.training.optimizers import create_optimizer
-
     validate_feedforward_init(structure)
 
-    # Create optimizer
-    optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))
     opt_state = optimizer.init(params)
 
     # Training hyperparameters
-    num_epochs = config.get("num_epochs", 10)
+    num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
     use_causal_mask = config.get("use_causal_mask", True)
+
+    # Support fractional epochs: e.g. 1.5 -> 2 loop iterations, last stops at 50%
+    total_epochs = math.ceil(num_epochs)
+    frac = num_epochs - math.floor(num_epochs)
 
     # JIT compile training step
     jit_train_step = jax.jit(
@@ -391,20 +406,31 @@ def train_backprop_autoregressive(
     iter_results = []
     epoch_results = []
 
-    for epoch_idx in range(num_epochs):
+    for epoch_idx in range(total_epochs):
         try:
             num_batches = len(train_loader)
         except TypeError:
             raise TypeError("train_loader must support len()")
 
-        # Split keys for batches
+        # On the final epoch, truncate if fractional
+        is_last_epoch = epoch_idx == total_epochs - 1
+        if is_last_epoch and frac > 0:
+            max_batches = round(frac * num_batches)
+        else:
+            max_batches = num_batches
+
+        # Split keys for actual batch count
         epoch_rng_key, rng_key = jax.random.split(rng_key)
-        batch_keys = jax.random.split(epoch_rng_key, num_batches)
+        batch_keys = jax.random.split(epoch_rng_key, max_batches)
 
         batch_losses = []
         epoch_loss = 0.0
+        batches_processed = 0
 
         for batch_idx, batch_data in enumerate(train_loader):
+            if batch_idx >= max_batches:
+                break
+
             # Convert batch to JAX format
             if isinstance(batch_data, dict):
                 batch = {k: jnp.array(v) for k, v in batch_data.items()}
@@ -422,6 +448,7 @@ def train_backprop_autoregressive(
             )
 
             epoch_loss += float(loss)
+            batches_processed += 1
 
             if iter_callback is not None:
                 batch_losses.append(iter_callback(epoch_idx, batch_idx, loss))
@@ -429,7 +456,7 @@ def train_backprop_autoregressive(
                 batch_losses.append(float(loss))
 
         iter_results.append(batch_losses)
-        avg_loss = epoch_loss / num_batches
+        avg_loss = epoch_loss / batches_processed if batches_processed > 0 else 0.0
 
         # Epoch callback
         if epoch_callback is not None:
@@ -442,7 +469,7 @@ def train_backprop_autoregressive(
         if verbose:
             perplexity = float(jnp.exp(avg_loss))
             print(
-                f"Epoch {epoch_idx + 1}/{num_epochs}, Loss: {avg_loss:.4f}, Perplexity: {perplexity:.2f}"
+                f"Epoch {epoch_idx + 1}/{total_epochs}, Loss: {avg_loss:.4f}, Perplexity: {perplexity:.2f}"
             )
 
     return params, iter_results, epoch_results

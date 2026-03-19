@@ -13,7 +13,9 @@ standard for embeddings, projections, and transformer layers. This means:
 For fully-connected (dense) behavior that flattens all dimensions, set `flatten_input=True`.
 """
 
-from typing import Dict, Any, Tuple
+from __future__ import annotations
+
+from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -26,7 +28,12 @@ from fabricpc.nodes.base import (
 from fabricpc.core.types import NodeParams, NodeState, NodeInfo
 from fabricpc.core.activations import IdentityActivation
 from fabricpc.core.energy import GaussianEnergy
-from fabricpc.core.initializers import NormalInitializer
+from fabricpc.core.initializers import NormalInitializer, KaimingInitializer
+
+if TYPE_CHECKING:
+    from fabricpc.core.activations import ActivationBase
+    from fabricpc.core.energy import EnergyFunctional
+    from fabricpc.core.initializers import InitializerBase
 
 
 class Linear(FlattenInputMixin, NodeBase):
@@ -42,20 +49,16 @@ class Linear(FlattenInputMixin, NodeBase):
     Uses FlattenInputMixin for flatten/reshape operations.
     """
 
-    DEFAULT_ACTIVATION = IdentityActivation
-    DEFAULT_ENERGY = GaussianEnergy
-    DEFAULT_LATENT_INIT = NormalInitializer
-
     def __init__(
         self,
-        shape,
-        name,
-        activation=None,
-        energy=None,
-        use_bias=True,
-        flatten_input=False,
-        weight_init=None,
-        latent_init=None,
+        shape: Tuple[int, ...],
+        name: str,
+        activation: Optional[ActivationBase] = IdentityActivation(),
+        energy: Optional[EnergyFunctional] = GaussianEnergy(),
+        use_bias: bool = True,
+        flatten_input: bool = False,
+        weight_init: Optional[InitializerBase] = KaimingInitializer(),
+        latent_init: Optional[InitializerBase] = NormalInitializer(),
     ):
         """
         Args:
@@ -74,9 +77,9 @@ class Linear(FlattenInputMixin, NodeBase):
             activation=activation,
             energy=energy,
             latent_init=latent_init,
+            weight_init=weight_init,
             use_bias=use_bias,
             flatten_input=flatten_input,
-            weight_init=weight_init,
         )
 
     @staticmethod
@@ -89,7 +92,8 @@ class Linear(FlattenInputMixin, NodeBase):
         key: jax.Array,
         node_shape: Tuple[int, ...],
         input_shapes: Dict[str, Tuple[int, ...]],
-        config: Dict[str, Any],
+        weight_init: Optional[InitializerBase] = None,
+        config: Dict[str, Any] = {},
     ) -> NodeParams:
         """
         Initialize weight matrix and bias vector.
@@ -102,6 +106,7 @@ class Linear(FlattenInputMixin, NodeBase):
             key: JAX random key
             node_shape: Output shape of this node (excluding batch dimension)
             input_shapes: Dictionary with EdgeInfo.key -> source shape for that edge
+            weight_init: InitializerBase instance for weight initialization, or None
             config: Node configuration with weight_init settings
 
         Returns:
@@ -111,8 +116,6 @@ class Linear(FlattenInputMixin, NodeBase):
 
         flatten_input = config.get("flatten_input", False)
 
-        # Get weight initialization - can be an InitializerBase instance or None
-        weight_init = config.get("weight_init", None)
         if weight_init is None:
             weight_init = NormalInitializer(mean=0.0, std=0.05)
 
@@ -144,12 +147,11 @@ class Linear(FlattenInputMixin, NodeBase):
                 rand_key_w[edge_key], weight_shape, weight_init
             )
 
-        # TODO - create bias vector for last dimension only and broadcast to (1,..., 1, out_features)
         # Initialize bias (usually zeros)
-        # Bias shape is (1,) + node_shape for proper broadcasting
+        # Bias shape for proper broadcasting, prepending batch dimension: (1, ..., 1, out_features)
         use_bias = config.get("use_bias", True)
         if use_bias:
-            bias_shape = (1,) + node_shape
+            bias_shape = (1,) * len(node_shape) + (node_shape[-1],)
             b = jnp.zeros(bias_shape)
 
         return NodeParams(weights=weights_dict, biases={"b": b} if use_bias else {})
@@ -232,19 +234,19 @@ class LinearExplicitGrad(Linear):
     Useful for:
     - Verifying correctness of manual gradient implementations
     - Prototyping optimized gradients
-    - Debugging gradient computation issues
+    - Debugging gradient computation issuesr
     """
 
     def __init__(
         self,
-        shape,
-        name,
-        activation=None,
-        energy=None,
-        use_bias=True,
-        flatten_input=False,
-        weight_init=None,
-        latent_init=None,
+        shape: Tuple[int, ...],
+        name: str,
+        activation: Optional[ActivationBase] = IdentityActivation(),
+        energy: Optional[EnergyFunctional] = GaussianEnergy(),
+        use_bias: bool = True,
+        flatten_input: bool = False,
+        weight_init: Optional[InitializerBase] = NormalInitializer(),
+        latent_init: Optional[InitializerBase] = NormalInitializer(),
     ):
         super().__init__(
             shape=shape,
@@ -272,7 +274,7 @@ class LinearExplicitGrad(Linear):
         _, state = node_class.forward(params, inputs, state, node_info)
 
         # Gain-modulated error computation
-        state = node_class.compute_gain_mod_error(state, node_info)
+        gain_mod_error = node_class.compute_gain_mod_error(state, node_info)
 
         # Determine the energy functional to use
         energy_obj = node_info.energy
@@ -286,7 +288,7 @@ class LinearExplicitGrad(Linear):
             if energy_type == "GaussianEnergy":
                 if flatten_input:
                     gain_mod_error_flat = FlattenInputMixin.flatten_input(
-                        state.substructure["gain_mod_error"]
+                        gain_mod_error
                     )
                     grad_flat = -jnp.matmul(
                         gain_mod_error_flat, params.weights[edge_key].T
@@ -296,7 +298,7 @@ class LinearExplicitGrad(Linear):
                     )
                 else:
                     grad_contribution = -jnp.matmul(
-                        state.substructure["gain_mod_error"],
+                        gain_mod_error,
                         params.weights[edge_key].T,
                     )
             else:
@@ -322,7 +324,7 @@ class LinearExplicitGrad(Linear):
         _, state = node_class.forward(params, inputs, state, node_info)
 
         # Gain-modulated error computation
-        state = node_class.compute_gain_mod_error(state, node_info)
+        gain_mod_error = node_class.compute_gain_mod_error(state, node_info)
 
         flatten_input = node_info.node_config.get("flatten_input", False)
         weight_grads = {}
@@ -332,35 +334,30 @@ class LinearExplicitGrad(Linear):
         for edge_key, in_tensor in inputs.items():
             if flatten_input:
                 in_flat = FlattenInputMixin.flatten_input(in_tensor)
-                gain_mod_error_flat = FlattenInputMixin.flatten_input(
-                    state.substructure["gain_mod_error"]
-                )
+                gain_mod_error_flat = FlattenInputMixin.flatten_input(gain_mod_error)
                 grad_w = -jnp.matmul(in_flat.T, gain_mod_error_flat)
             else:
                 in_shape = in_tensor.shape
-                err_shape = state.substructure["gain_mod_error"].shape
+                err_shape = gain_mod_error.shape
                 in_flat = in_tensor.reshape(-1, in_shape[-1])
-                err_flat = state.substructure["gain_mod_error"].reshape(
-                    -1, err_shape[-1]
-                )
+                err_flat = gain_mod_error.reshape(-1, err_shape[-1])
                 grad_w = -jnp.matmul(in_flat.T, err_flat)
             weight_grads[edge_key] = grad_w
 
         # Bias gradient
         if "b" in params.biases:
-            grad_b = -jnp.sum(
-                state.substructure["gain_mod_error"], axis=0, keepdims=True
-            )
+            grad_b = -jnp.sum(gain_mod_error, axis=0, keepdims=True)
             bias_grads["b"] = grad_b
 
         return state, NodeParams(weights=weight_grads, biases=bias_grads)
 
     @staticmethod
-    def compute_gain_mod_error(state: NodeState, node_info: NodeInfo) -> NodeState:
-        """Compute gain-modulated error for this node."""
+    def compute_gain_mod_error(state: NodeState, node_info: NodeInfo) -> jnp.ndarray:
+        """Compute gain-modulated error for this node.
+
+        Returns:
+            gain_mod_error array (error * activation derivative)
+        """
         activation = node_info.activation
         f_prime = type(activation).derivative(state.pre_activation, activation.config)
-        gain_mod_error = state.error * f_prime
-
-        state = state._replace(substructure={"gain_mod_error": gain_mod_error})
-        return state
+        return state.error * f_prime

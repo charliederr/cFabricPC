@@ -1,16 +1,42 @@
 """
-Core inference dynamics for JAX predictive coding networks with local Hebbian learning.
+Core inference dynamics for JAX predictive coding networks.
 
-This module implements the functional inference loop that updates latent states
-using local gradients computed via Jacobian for true predictive coding.
+This module provides:
+- InferenceBase: Abstract base class for inference algorithms
+- InferenceSGD: Default SGD-based inference (z -= eta * grad)
+- run_inference: Convenience function wrapping the class-based API
+
+Inference algorithms control how latent states are updated during the
+inference loop. The primary extension point is `latent_update()`.
+
+Usage:
+    from fabricpc.core.inference import InferenceSGD
+
+    structure = graph(
+        nodes=[...], edges=[...], task_map=...,
+        inference=InferenceSGD(eta_infer=0.05, infer_steps=20),
+    )
 """
 
-from typing import Dict
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+import types
+
 import jax
 import jax.numpy as jnp
 
-from fabricpc.core.types import GraphParams, GraphState, GraphStructure, NodeInfo
+from fabricpc.core.types import (
+    GraphParams,
+    GraphState,
+    GraphStructure,
+    NodeInfo,
+    NodeState,
+)
 from fabricpc.utils.helpers import update_node_in_state
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
 
 def gather_inputs(
@@ -32,88 +58,273 @@ def gather_inputs(
     return in_edges_data
 
 
-def inference_step(
-    params: GraphParams,
-    state: GraphState,
-    clamps: Dict[str, jnp.ndarray],
-    structure: GraphStructure,
-    eta_infer: float,
-) -> GraphState:
+# =============================================================================
+# Inference Base Class
+# =============================================================================
+
+
+class InferenceBase(ABC):
     """
-    Single inference step with local gradient computation.
+    Abstract base class for inference algorithms.
+
+    Inference algorithms control how latent states are updated during the
+    inference loop. The primary extension point is `latent_update()`.
+
+    Custom inference algorithms extend this class:
+
+    All computation methods are static for JAX compatibility (pure functions, no state).
+    """
+
+    def __init__(self, **config):
+        self.config = types.MappingProxyType(config)  # Immutable dictionary
+
+    @staticmethod
+    def inference_step(
+        params: GraphParams,
+        state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+        config: Dict[str, Any],
+    ) -> GraphState:
+        """
+        Single inference step: forward phase -> latent update.
+
+        Override for algorithms that need a different phase structure
+        (e.g., momentum that accumulates across steps).
+        """
+        inference_obj = structure.config["inference"]
+        cls = type(inference_obj)
+
+        # Phase 1: Zero the latent gradients
+        state = cls.zero_grads(params, state, clamps, structure)
+
+        # Phase 2: Forward pass to predict expected state (z_mu) & accumulate latent grads
+        state = cls.forward_value_and_grad(params, state, clamps, structure)
+
+        # Phase 3: Update the latent (z_state) with gradient
+        state = cls.update_latents(params, state, clamps, structure, config)
+
+        return state
+
+    @staticmethod
+    def zero_grads(
+        params: GraphParams,
+        state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+    ) -> GraphState:
+        """
+        Phase 1: Zero the latent gradients
+        """
+        # Phase 1: Zero latent gradients
+        for node_name in structure.nodes:
+            node_state = state.nodes[node_name]
+            zero_grad = jnp.zeros_like(node_state.z_latent)
+            state = update_node_in_state(state, node_name, latent_grad=zero_grad)
+
+        return state
+
+    @staticmethod
+    def forward_value_and_grad(
+        params: GraphParams,
+        state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+    ) -> GraphState:
+        """
+        Phase 2: Forward pass value & grad; accumulate latent grads.
+
+        This is the universal predictive coding mechanics shared by all inference algorithms.
+        Phase 3 (latent update) is handled by the inference algorithm's latent_update() method.
+        """
+        for node_name in structure.nodes:
+            # Get node and its info
+            node = structure.nodes[node_name]
+            node_info = node.node_info
+            node_class = node_info.node_class
+            node_state = state.nodes[node_name]
+            node_params = params.nodes[node_name]
+
+            # Gather inputs for each slot
+            in_edges_data = gather_inputs(node_info, structure, state)
+
+            # Compute predictions, error, and latent gradient contributions
+            node_state, inedge_grads = node_class.forward_inference(
+                node_params,
+                in_edges_data,
+                node_state,
+                node_info,
+                is_clamped=(node_name in clamps),
+            )
+
+            # Update the graph state with node state containing errors and energy
+            state = state._replace(nodes={**state.nodes, node_name: node_state})
+
+            # Accumulate gradient contributions to this node's sources (local backward pass to in-neighbors)
+            for edge_key, grad in inedge_grads.items():
+                source_name = structure.edges[edge_key].source
+                latent_grad = state.nodes[source_name].latent_grad + grad
+                state = update_node_in_state(
+                    state, source_name, latent_grad=latent_grad
+                )
+
+        return state
+
+    @staticmethod
+    def update_latents(
+        params: GraphParams,
+        state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+        config: Dict[str, Any],
+    ) -> GraphState:
+        """
+        Update latent states for each node based on the accumulated latent gradients.
+        """
+        inference_obj = structure.config["inference"]
+        cls = type(inference_obj)
+
+        for node_name in structure.nodes:
+            node_state = state.nodes[node_name]
+
+            if node_name not in clamps:
+                new_z_latent = cls.compute_new_latent(
+                    node_name,
+                    node_state,
+                    config,
+                )
+                state = update_node_in_state(state, node_name, z_latent=new_z_latent)
+
+        return state
+
+    @staticmethod
+    @abstractmethod
+    def compute_new_latent(
+        node_name: str,
+        node_state: NodeState,
+        config: Dict[str, Any],
+    ) -> jnp.ndarray:
+        """
+        Compute the updated z_latent for a single node.
+        This is the primary extension point for custom inference algorithms.
+
+        Returns:
+            Updated z_latent array
+        """
+        pass
+
+    @staticmethod
+    def run_inference(
+        params: GraphParams,
+        initial_state: GraphState,
+        clamps: Dict[str, jnp.ndarray],
+        structure: GraphStructure,
+    ) -> GraphState:
+        """
+        Outer inference loop using lax.fori_loop.
+
+        Override for scan-based tracking, adaptive stopping, etc.
+        infer_steps is read from self.config['infer_steps'].
+        """
+        inference_obj = structure.config["inference"]
+        inference_cls = type(inference_obj)
+        config = inference_obj.config
+        infer_steps = config["infer_steps"]
+
+        def body_fn(t, state):
+            return inference_cls.inference_step(
+                params, state, clamps, structure, config
+            )
+
+        # Use lax.fori_loop for efficiency
+        final_state = jax.lax.fori_loop(0, infer_steps, body_fn, initial_state)
+        return final_state
+
+
+# =============================================================================
+# Built-in Inference Algorithms
+# =============================================================================
+
+
+class InferenceSGD(InferenceBase):
+    """
+    Standard SGD inference: z -= eta * grad.
+
+    This is the default inference algorithm for predictive coding networks.
 
     Args:
-        params: Model parameters
-        state: Current graph state
-        clamps: Dictionary of clamped values
-        structure: Graph structure
-        eta_infer: Inference learning rate
-
-    Returns:
-        Updated graph state
+        eta_infer: Inference learning rate (default: 0.1)
+        infer_steps: Number of inference iterations (default: 20)
     """
 
-    # TODO parallelize over nodes for efficiency
-
-    # 1. Zero the latent gradients
-    for node_name in structure.nodes:
-        # Reset gradients
-        node_state = state.nodes[node_name]
-        zero_grad = jnp.zeros_like(node_state.z_latent)
-        state = update_node_in_state(state, node_name, latent_grad=zero_grad)
-
-    # 2. Forward inference pass
-    for node_name in structure.nodes:
-        # Get node and its info
-        node = structure.nodes[node_name]
-        node_info = node.node_info
-        node_class = node_info.node_class
-        node_state = state.nodes[node_name]
-        node_params = params.nodes[node_name]
-
-        # Gather inputs for each slot
-        in_edges_data = gather_inputs(node_info, structure, state)
-
-        # Compute predictions, error, and latent gradient contributions
-        node_state, inedge_grads = node_class.forward_inference(
-            node_params,
-            in_edges_data,
-            node_state,
-            node_info,
-            is_clamped=(node_name in clamps),
+    def __init__(self, eta_infer=0.1, infer_steps=20, latent_decay=0.0):
+        super().__init__(
+            eta_infer=eta_infer, infer_steps=infer_steps, latent_decay=latent_decay
         )
 
-        # Update the graph state with node state containing errors and energy
-        state = state._replace(nodes={**state.nodes, node_name: node_state})
+    @staticmethod
+    def compute_new_latent(node_name, node_state, config):
 
-        # Accumulate gradient contributions to this node's sources (local backward pass to in-neighbors)
-        for edge_key, grad in inedge_grads.items():
-            source_name = structure.edges[
-                edge_key
-            ].source  # Look up node name from edge key
-            latent_grad = state.nodes[source_name].latent_grad
-            latent_grad = (
-                latent_grad + grad
-            )  # Send gradient contribution to source node
-            state = update_node_in_state(state, source_name, latent_grad=latent_grad)
+        eta_infer = config["eta_infer"]
+        latent_decay = config["latent_decay"]
 
-    # 3. Update latent states by gradient descent
-    for node_name in structure.nodes:
-        node_state = state.nodes[node_name]
-        if node_name in clamps:
-            # Keep clamped nodes fixed
-            new_z_latent = clamps[node_name]
-        else:
-            # Gradient descent
-            new_z_latent = node_state.z_latent - eta_infer * node_state.latent_grad
-        # Update state
-        state = update_node_in_state(state, node_name, z_latent=new_z_latent)
+        new_latent = (
+            node_state.z_latent * (1.0 - eta_infer * latent_decay)
+            - eta_infer * node_state.latent_grad
+        )
+        return new_latent
 
-    for node_name in structure.nodes:
-        # Reset substructure
-        state = update_node_in_state(state, node_name, substructure={})
 
-    return state
+class InferenceSGDNormClip(InferenceBase):
+    """
+    SGD inference with per-node gradient norm clipping: z -= eta * clip(grad).
+
+    Clips the L2 norm of each node's latent gradient independently per sample.
+    If ||grad|| > max_norm, scales grad down to max_norm.
+    Uses safe division with epsilon to handle zero gradients.
+
+    Args:
+        eta_infer: Inference learning rate (default: 0.1)
+        infer_steps: Number of inference iterations (default: 20)
+        max_norm: Maximum gradient norm per node (default: 1.0)
+        eps: Small constant for numerical stability (default: 1e-8)
+    """
+
+    def __init__(
+        self, eta_infer=0.1, infer_steps=20, latent_decay=0.0, max_norm=1.0, eps=1e-8
+    ):
+        super().__init__(
+            eta_infer=eta_infer,
+            latent_decay=latent_decay,
+            infer_steps=infer_steps,
+            max_norm=max_norm,
+            eps=eps,
+        )
+
+    @staticmethod
+    def compute_new_latent(node_name, node_state, config):
+        eta_infer = config["eta_infer"]
+        latent_decay = config["latent_decay"]
+        max_norm = config["max_norm"]
+        eps = config["eps"]
+
+        grad = node_state.latent_grad
+        # Per-sample L2 norm (sum over all non-batch dims)
+        grad_norm = jnp.sqrt(
+            jnp.sum(grad.conj() * grad, axis=tuple(range(1, grad.ndim)), keepdims=True)
+        )
+        clip_factor = jnp.minimum(1.0, max_norm / (grad_norm + eps))
+        clipped_grad = grad * clip_factor
+
+        return (
+            node_state.z_latent * (1.0 - eta_infer * latent_decay)
+            - eta_infer * clipped_grad
+        )
+
+
+# =============================================================================
+# Convenience Function
+# =============================================================================
 
 
 def run_inference(
@@ -121,28 +332,24 @@ def run_inference(
     initial_state: GraphState,
     clamps: Dict[str, jnp.ndarray],
     structure: GraphStructure,
-    infer_steps: int,
-    eta_infer: float = 0.1,
 ) -> GraphState:
     """
-    Run inference for infer_steps steps to converge latent states.
+    Run inference using the algorithm object stored in the graph structure.
+
+    Convenience wrapper that extracts the inference object from
+    ``structure.config["inference"]`` and delegates to its class's
+    static ``run_inference`` method.
 
     Args:
-        params: Model parameters
-        initial_state: Initial graph state
-        clamps: Dictionary of clamped values
-        structure: Graph structure
-        infer_steps: Number of inference steps
-        eta_infer: Inference learning rate
+        params: Graph parameters.
+        initial_state: Initial graph state.
+        clamps: Clamped node values.
+        structure: Graph structure containing the inference object.
 
     Returns:
-        Final converged graph state
+        Converged graph state after inference.
     """
-
-    def body_fn(t, state):
-        return inference_step(params, state, clamps, structure, eta_infer)
-
-    # Use lax.fori_loop for efficiency
-    final_state = jax.lax.fori_loop(0, infer_steps, body_fn, initial_state)
-
-    return final_state
+    inference_object = structure.config["inference"]
+    return type(inference_object).run_inference(
+        params, initial_state, clamps, structure
+    )

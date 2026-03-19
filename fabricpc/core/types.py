@@ -42,6 +42,7 @@ class NodeInfo:
     activation: Any  # ActivationBase instance
     energy: Any  # EnergyFunctional instance
     latent_init: Any  # InitializerBase instance or None
+    weight_init: Any  # InitializerBase instance or None
     slots: Dict[str, SlotInfo]  # {"in": SlotInfo, ...}
     in_degree: int  # Number of incoming edges
     out_degree: int  # Number of outgoing edges
@@ -105,7 +106,6 @@ class NodeState(NamedTuple):
         energy: Energy
         pre_activation: Pre-activation values (before activation function)
         latent_grad: Gradients w.r.t. latent states for inference updates
-        substructure: Dictionary of node internal states for complex nodes
     """
 
     z_latent: jnp.ndarray
@@ -114,7 +114,6 @@ class NodeState(NamedTuple):
     energy: jnp.ndarray  # per-sample energy, shape (batch_size,)
     pre_activation: jnp.ndarray
     latent_grad: jnp.ndarray  # For local gradient accumulation
-    substructure: Dict[str, jnp.ndarray]  # substructure of node internal states
 
 
 class GraphState(NamedTuple):
@@ -161,6 +160,7 @@ class GraphStructure(NamedTuple):
         n_edges = len(self.edges)
         return f"GraphStructure(nodes={n_nodes}, edges={n_edges})"
 
+    # TODO move to a utility and remove duplicated code in graph_builder.py
     @staticmethod
     def _topological_sort(
         nodes: Dict[str, Any], edges: Dict[str, "EdgeInfo"]
@@ -228,7 +228,6 @@ tree_util.register_pytree_node(
             ns.energy,
             ns.pre_activation,
             ns.latent_grad,
-            ns.substructure,
         ),
         None,
     ),

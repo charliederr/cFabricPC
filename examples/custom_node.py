@@ -1,36 +1,23 @@
 """
-Example: Custom Conv2D Node
-=====================================
+Custom Conv2D Node — MNIST Demo
 
-This example demonstrates:
-1. Creating a custom node type by subclassing NodeBase
-2. Implementing forward pass using JAX's lax.conv
-3. Using the object-oriented API for node configuration
-4. Training on MNIST using the standard train_pcn/evaluate_pcn methods
-
-Run with: python examples/custom_node.py
+Create a custom node type by subclassing NodeBase, implementing a
+forward pass with JAX's lax.conv, and training on MNIST.
 """
 
-import os  # set environment variables before importing JAX
+from fabricpc.utils.helpers import set_jax_flags_before_importing_jax
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault(
-    "JAX_PLATFORMS", "cuda"
-)  # options: "cpu", "cuda" or "tpu" if available
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # Suppress XLA warnings
-os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true"
+set_jax_flags_before_importing_jax(jax_platforms="cuda")
 
 import time
 from typing import Dict, Any, Tuple
 import jax
 import jax.numpy as jnp
+import optax
 from fabricpc.utils.data.dataloader import MnistLoader
 
 from fabricpc.nodes import Linear
-from fabricpc.nodes.base import (
-    NodeBase,
-    SlotSpec,
-)
+from fabricpc.nodes.base import NodeBase, SlotSpec
 from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.graph import initialize_params
 from fabricpc.core.activations import (
@@ -40,12 +27,11 @@ from fabricpc.core.activations import (
 )
 from fabricpc.core.energy import GaussianEnergy
 from fabricpc.core.initializers import NormalInitializer, initialize
+from fabricpc.core.inference import InferenceSGD
 from fabricpc.core.types import NodeParams, NodeState, NodeInfo
 from fabricpc.training import train_pcn, evaluate_pcn
 
-# ==============================================================================
-# CUSTOM NODE DEFINITION
-# ==============================================================================
+# --- Custom Node Definition ---
 
 
 class Conv2DNode(NodeBase):
@@ -61,10 +47,6 @@ class Conv2DNode(NodeBase):
         padding: str - "VALID" or "SAME" (default: "SAME")
     """
 
-    DEFAULT_ACTIVATION = ReLUActivation
-    DEFAULT_ENERGY = GaussianEnergy
-    DEFAULT_LATENT_INIT = NormalInitializer
-
     def __init__(
         self,
         shape,
@@ -72,11 +54,19 @@ class Conv2DNode(NodeBase):
         kernel_size,
         stride=(1, 1),
         padding="SAME",
+        activation=ReLUActivation(),
+        energy=GaussianEnergy(),
+        latent_init=NormalInitializer(),
+        weight_init=NormalInitializer(),
         **kwargs,
     ):
         super().__init__(
             shape=shape,
             name=name,
+            activation=activation,
+            energy=energy,
+            latent_init=latent_init,
+            weight_init=weight_init,
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
@@ -93,7 +83,8 @@ class Conv2DNode(NodeBase):
         key: jax.Array,
         node_shape: Tuple[int, ...],
         input_shapes: Dict[str, Tuple[int, ...]],
-        config: Dict[str, Any],
+        weight_init=None,
+        config: Dict[str, Any] = {},
     ) -> NodeParams:
         """
         Initialize convolution kernels and biases.
@@ -104,8 +95,6 @@ class Conv2DNode(NodeBase):
         kernel_size = config.get("kernel_size")
         out_channels = node_shape[-1]  # Last dim is channels (NHWC)
 
-        # Get weight initialization config
-        weight_init = config.get("weight_init", None)
         if weight_init is None:
             weight_init = NormalInitializer(mean=0.0, std=0.05)
 
@@ -195,9 +184,7 @@ class Conv2DNode(NodeBase):
         return total_energy, state
 
 
-# ==============================================================================
-# NETWORK CONFIGURATION
-# ==============================================================================
+# --- Network Configuration ---
 
 
 def create_conv_mnist_structure():
@@ -246,28 +233,22 @@ def create_conv_mnist_structure():
             Edge(source=conv2, target=output_node.slot("in")),
         ],
         task_map=TaskMap(x=input_node, y=output_node),
+        inference=InferenceSGD(eta_infer=0.05, infer_steps=10),
     )
 
     return structure
 
 
-# ==============================================================================
-# MAIN
-# ==============================================================================
+# --- Main ---
 
 
 def main():
-    print("=" * 70)
-    print("Custom Node Example: Conv2D on MNIST")
-    print("=" * 70)
+    print("Custom Node Example: Conv2D on MNIST\n")
 
-    # Set random seeds for reproducibility
     jax.config.update("jax_default_prng_impl", "threefry2x32")
     master_rng_key = jax.random.PRNGKey(42)
     graph_key, train_key, eval_key = jax.random.split(master_rng_key, 3)
 
-    # Create model
-    print("\nCreating convolutional MNIST classifier...")
     structure = create_conv_mnist_structure()
     params = initialize_params(structure, graph_key)
 
@@ -280,27 +261,21 @@ def main():
     total_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
     print(f"Total parameters: {total_params:,}")
 
-    # Training config (fewer epochs for demo)
-    train_config = {
-        "num_epochs": 3,  # Fewer epochs for demo
-        "infer_steps": 10,  # Inference steps
-        "eta_infer": 0.05,  # Inference learning rate
-        "optimizer": {"type": "adam", "lr": 0.001},
-    }
-    batch_size = 64  # Smaller batch for conv nets
+    optimizer = optax.adam(0.001)
+    train_config = {"num_epochs": 3}
+    batch_size = 64
 
     train_loader = MnistLoader("train", batch_size=batch_size, shuffle=True, seed=42)
     test_loader = MnistLoader("test", batch_size=batch_size, shuffle=False)
 
-    # Train
-    print("\nTraining (JIT compilation on first batch, may take a moment)...")
-    print("Note: Conv2D gradient computation is slower than Linear nodes.")
+    print("Training (JIT compilation on first batch)...")
     start_time = time.time()
 
     trained_params, energy_history, _ = train_pcn(
         params=params,
         structure=structure,
         train_loader=train_loader,
+        optimizer=optimizer,
         config=train_config,
         rng_key=train_key,
         verbose=True,
@@ -311,24 +286,13 @@ def main():
         f"Training time: {train_time:.1f}s ({train_time / train_config['num_epochs']:.1f}s per epoch)"
     )
 
-    # Evaluate
-    print("\nEvaluating on test set...")
+    print("\nEvaluating...")
     metrics = evaluate_pcn(
         trained_params, structure, test_loader, train_config, eval_key
     )
 
     print(f"Test Accuracy: {metrics['accuracy'] * 100:.2f}%")
-    print(f"Test Energy: {metrics['energy']:.4f}")
-
-    print("\n" + "=" * 70)
-    print("Custom node example complete!")
-    print("\nKey takeaways:")
-    print("  1. Create custom nodes by subclassing NodeBase")
-    print("  2. Set DEFAULT_ACTIVATION, DEFAULT_ENERGY, DEFAULT_LATENT_INIT")
-    print("  3. Implement get_slots(), initialize_params(), and forward()")
-    print("  4. Use object-oriented API with graph() for network construction")
-    print("  5. Use train_pcn/evaluate_pcn for standard training workflow")
-    print("=" * 70)
+    print(f"Test Energy:   {metrics['energy']:.4f}")
 
 
 if __name__ == "__main__":

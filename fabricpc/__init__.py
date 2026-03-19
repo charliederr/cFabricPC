@@ -30,6 +30,7 @@ Example:
     ...         Edge(source=hidden, target=output.slot("in")),
     ...     ],
     ...     task_map=TaskMap(x=input_node, y=output),
+    ...     inference=InferenceSGD(eta_infer=0.05, infer_steps=10),
     ... )
     >>> params = initialize_params(structure, rng_key)
     >>> trained_params, history, _ = train_pcn(params, structure, train_loader, config)
@@ -41,7 +42,7 @@ from importlib.metadata import version
 __version__ = version("fabricpc")
 
 # Submodules (for advanced use)
-from fabricpc import core, graph, nodes, training, utils, builder
+from fabricpc import core, graph, nodes, training, utils, builder, experiments
 
 # Core API - what most users need
 from fabricpc.graph import initialize_params
@@ -66,4 +67,5 @@ __all__ = [
     "builder",
     "training",
     "utils",
+    "experiments",
 ]

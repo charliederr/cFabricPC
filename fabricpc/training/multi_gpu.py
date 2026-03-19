@@ -16,13 +16,14 @@ which replicates the computation across devices and averages gradients.
 """
 
 from typing import Dict, Tuple, Any, cast, Iterable
+import math
 import jax
 import jax.numpy as jnp
 import optax
 
 from fabricpc.core.types import GraphParams, GraphState, GraphStructure
-from fabricpc.core.inference import run_inference
 from fabricpc.graph.state_initializer import initialize_graph_state
+from fabricpc.core.inference import run_inference
 from fabricpc.training.train import get_graph_param_gradient
 
 
@@ -108,8 +109,6 @@ def train_step_pmap(
     structure: GraphStructure,
     rng_key: jax.Array,
     optimizer: optax.GradientTransformation,
-    infer_steps: int,
-    eta_infer: float = 0.1,
 ) -> Tuple[GraphParams, optax.OptState, jnp.ndarray, GraphState]:
     """
     Training step parallelized across devices using pmap.
@@ -124,15 +123,13 @@ def train_step_pmap(
         rng_key: JAX random key for this device
         structure: Graph structure
         optimizer: Optax optimizer
-        infer_steps: Number of inference steps
-        eta_infer: Inference learning rate
 
     Returns:
         Tuple of (updated_params, updated_opt_state, energy_per_device, final_state)
     """
     # Compute gradients using local Hebbian learning (shared code with single-GPU)
     grads, energy, final_state = get_graph_param_gradient(
-        params, batch, structure, rng_key, infer_steps, eta_infer
+        params, batch, structure, rng_key
     )
 
     # Normalize energy by batch size for this shard
@@ -155,8 +152,6 @@ def train_step_pmap(
 def create_pmap_train_step(
     structure: GraphStructure,
     optimizer: optax.GradientTransformation,
-    infer_steps: int,
-    eta_infer: float,
 ):
     """
     Create a pmap'ed training step with static arguments captured in closure.
@@ -164,8 +159,6 @@ def create_pmap_train_step(
     Args:
         structure: Graph structure (static)
         optimizer: Optimizer (static)
-        infer_steps: Number of inference steps (static)
-        eta_infer: Inference learning rate (static)
 
     Returns:
         Pmap'ed training step function
@@ -179,8 +172,6 @@ def create_pmap_train_step(
             structure,
             rng_key,
             optimizer,
-            infer_steps,
-            eta_infer,
         )
 
     return jax.pmap(step_fn, axis_name="devices")
@@ -190,6 +181,7 @@ def train_pcn_multi_gpu(
     params: GraphParams,
     structure: GraphStructure,
     train_loader: Any,
+    optimizer: optax.GradientTransformation,
     config: dict,
     rng_key: jax.Array,
     verbose: bool = True,
@@ -201,6 +193,7 @@ def train_pcn_multi_gpu(
         params: Initial parameters (single device)
         structure: Graph structure
         train_loader: Data loader
+        optimizer: Optax optimizer (e.g., optax.adam(1e-3))
         config: Training configuration
         rng_key: JAX random key
         verbose: Whether to print progress
@@ -210,10 +203,9 @@ def train_pcn_multi_gpu(
 
     Example:
         >>> params = initialize_params(structure, jax.random.PRNGKey(0))
-        >>> trained = train_pcn_multi_gpu(params, structure, train_loader, config)
+        >>> optimizer = optax.adam(1e-3)
+        >>> trained = train_pcn_multi_gpu(params, structure, train_loader, optimizer, config)
     """
-    from fabricpc.training.optimizers import create_optimizer
-
     # Get available devices
     n_devices = jax.device_count()
     if verbose:
@@ -226,8 +218,6 @@ def train_pcn_multi_gpu(
                 "Only 1 device available, using multi-gpu training function with single device."
             )
 
-    # Create optimizer
-    optimizer = create_optimizer(config.get("optimizer", {"type": "adam", "lr": 1e-3}))
     opt_state = optimizer.init(params)
 
     # Replicate params and optimizer state across devices
@@ -235,17 +225,17 @@ def train_pcn_multi_gpu(
     opt_state = replicate_opt_state(opt_state, n_devices)
 
     # Get training hyperparameters
-    infer_steps = config.get("infer_steps", 20)
-    eta_infer = config.get("eta_infer", 0.1)
-    num_epochs = config.get("num_epochs", 10)
+    num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
+
+    # Support fractional epochs: e.g. 1.5 -> 2 loop iterations, last stops at 50%
+    total_epochs = math.ceil(num_epochs)
+    frac = num_epochs - math.floor(num_epochs)
 
     # Create pmap'ed training step (uses local Hebbian learning like single-GPU)
-    pmap_train_step = create_pmap_train_step(
-        structure, optimizer, infer_steps, eta_infer
-    )
+    pmap_train_step = create_pmap_train_step(structure, optimizer)
 
     # Training loop
-    for epoch in range(num_epochs):
+    for epoch in range(total_epochs):
         epoch_energies = []
 
         # Split keys for devices
@@ -259,12 +249,22 @@ def train_pcn_multi_gpu(
         # Estimate number of batches for key splitting
         num_batches = len(train_loader)
 
+        # On the final epoch, truncate if fractional
+        is_last_epoch = epoch == total_epochs - 1
+        if is_last_epoch and frac > 0:
+            max_batches = round(frac * num_batches)
+        else:
+            max_batches = num_batches
+
         # Create keys for all batches (split on each device)
-        batch_keys_per_device = jax.vmap(lambda k: jax.random.split(k, num_batches))(
+        batch_keys_per_device = jax.vmap(lambda k: jax.random.split(k, max_batches))(
             device_keys
         )
 
         for batch_idx, batch_data in enumerate(train_loader):
+            if batch_idx >= max_batches:
+                break
+
             batch_key_for_step = batch_keys_per_device[:, batch_idx]
 
             # Convert batch to JAX format
@@ -303,7 +303,7 @@ def train_pcn_multi_gpu(
         )
 
         if verbose:
-            print(f"Epoch {epoch + 1}/{num_epochs}, Energy: {avg_energy:.4f}")
+            print(f"Epoch {epoch + 1}/{total_epochs}, Energy: {avg_energy:.4f}")
 
     # Extract params from first device (all devices have same params due to pmean)
     params = jax.tree_util.tree_map(lambda x: x[0], params)
@@ -334,9 +334,6 @@ def evaluate_transformer_multi_gpu(
     # Replicate params across devices
     params = replicate_params(params, n_devices)
 
-    infer_steps = config.get("infer_steps", 20)
-    eta_infer = config.get("eta_infer", 0.1)
-
     # Handle loader length safely
     try:
         num_batches = len(test_loader)
@@ -364,9 +361,7 @@ def evaluate_transformer_multi_gpu(
             structure, batch_size_, randgen_key, clamps=clamps, params=params_obj
         )
 
-        final_state = run_inference(
-            params_obj, state, clamps, structure, infer_steps, eta_infer
-        )
+        final_state = run_inference(params_obj, state, clamps, structure)
         return final_state
 
     pmap_inference = jax.pmap(inference_fn, axis_name="devices")
@@ -514,8 +509,6 @@ def evaluate_pcn_multi_gpu(
     # Replicate params across devices
     params = replicate_params(params, n_devices)
 
-    infer_steps = config.get("infer_steps", 20)
-    eta_infer = config.get("eta_infer", 0.1)
     # Estimate number of batches for key splitting
     num_batches = len(test_loader)
 
@@ -544,9 +537,7 @@ def evaluate_pcn_multi_gpu(
             clamps=clamps,
             params=params_obj,
         )
-        final_state = run_inference(
-            params_obj, state, clamps, structure, infer_steps, eta_infer
-        )
+        final_state = run_inference(params_obj, state, clamps, structure)
         return final_state
 
     pmap_inference = jax.pmap(inference_fn, axis_name="devices")

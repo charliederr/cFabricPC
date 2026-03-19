@@ -3,19 +3,16 @@
 Test suite for backprop training functions: train_backprop and evaluate_backprop.
 """
 
-import os
-
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("JAX_TRACEBACK_FILTERING", "off")
-
 import pytest
 import jax
 import jax.numpy as jnp
+import optax
 
 from fabricpc.nodes import Linear
 from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.graph import initialize_params
 from fabricpc.core.activations import ReLUActivation, SoftmaxActivation
+from fabricpc.core.inference import InferenceSGD
 from fabricpc.graph.state_initializer import GlobalStateInit
 from fabricpc.training.train_backprop import (
     train_backprop,
@@ -23,8 +20,6 @@ from fabricpc.training.train_backprop import (
     compute_forward_pass,
     validate_feedforward_init,
 )
-
-jax.config.update("jax_platform_name", "cpu")
 
 
 class MockDataLoader:
@@ -50,11 +45,6 @@ class MockDataLoader:
 
 
 @pytest.fixture
-def rng_key():
-    return jax.random.PRNGKey(42)
-
-
-@pytest.fixture
 def graph_with_feedforward(rng_key):
     """Graph with feedforward state initializer for backprop training."""
     input_node = Linear(shape=(10,), name="input")
@@ -68,6 +58,7 @@ def graph_with_feedforward(rng_key):
             Edge(source=hidden, target=output.slot("in")),
         ],
         task_map=TaskMap(x=input_node, y=output),
+        inference=InferenceSGD(),
     )
     params = initialize_params(structure, rng_key)
     return params, structure
@@ -93,14 +84,14 @@ class TestTrainBackprop:
         """Test train_backprop returns correct outputs and updates parameters."""
         params, structure = graph_with_feedforward
         train_loader = make_mock_loader(rng_key, num_batches=4)
+        optimizer = optax.adam(0.01)
         config = {
             "num_epochs": 2,
-            "optimizer": {"type": "adam", "lr": 0.01},
             "loss_type": "cross_entropy",
         }
 
         trained_params, iter_results, epoch_results = train_backprop(
-            params, structure, train_loader, config, rng_key, verbose=False
+            params, structure, train_loader, optimizer, config, rng_key, verbose=False
         )
 
         # Verify return structure
@@ -129,7 +120,8 @@ class TestTrainBackprop:
         """Test train_backprop with epoch and iteration callbacks."""
         params, structure = graph_with_feedforward
         train_loader = make_mock_loader(rng_key, num_batches=2)
-        config = {"num_epochs": 2, "optimizer": {"type": "adam", "lr": 0.01}}
+        optimizer = optax.adam(0.01)
+        config = {"num_epochs": 2}
 
         epoch_calls = []
         iter_calls = []
@@ -146,6 +138,7 @@ class TestTrainBackprop:
             params,
             structure,
             train_loader,
+            optimizer,
             config,
             rng_key,
             verbose=False,
@@ -168,6 +161,7 @@ class TestTrainBackprop:
                 Edge(source=input_node, target=output.slot("in")),
             ],
             task_map=TaskMap(x=input_node, y=output),
+            inference=InferenceSGD(),
             graph_state_initializer=GlobalStateInit(),  # Not feedforward
         )
 
@@ -249,6 +243,7 @@ class TestIntegration:
                 Edge(source=hidden, target=output.slot("in")),
             ],
             task_map=TaskMap(x=input_node, y=output),
+            inference=InferenceSGD(),
         )
         params = initialize_params(structure, rng_key)
 
@@ -257,14 +252,20 @@ class TestIntegration:
             jax.random.PRNGKey(999), batch_size=8, num_batches=3
         )
 
+        optimizer = optax.adam(0.01)
         train_config = {
             "num_epochs": 5,
-            "optimizer": {"type": "adam", "lr": 0.01},
             "loss_type": "cross_entropy",
         }
 
         trained_params, iter_results, _ = train_backprop(
-            params, structure, train_loader, train_config, rng_key, verbose=False
+            params,
+            structure,
+            train_loader,
+            optimizer,
+            train_config,
+            rng_key,
+            verbose=False,
         )
 
         eval_config = {"loss_type": "cross_entropy"}

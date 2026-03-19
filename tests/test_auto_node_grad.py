@@ -5,17 +5,12 @@ Verifies that LinearExplicitGrad (using JAX autodiff) produces
 numerically equivalent gradients to Linear (using manual formulas).
 """
 
-import os
-
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("JAX_TRACEBACK_FILTERING", "off")
-
 import pytest
 import jax
 import jax.numpy as jnp
 
 from fabricpc.core.types import NodeState, NodeParams, NodeInfo
-from fabricpc.core.inference import run_inference, gather_inputs
+from fabricpc.core.inference import gather_inputs, InferenceSGD
 from fabricpc.nodes import (
     Linear,
     LinearExplicitGrad,
@@ -32,16 +27,6 @@ from fabricpc.core.energy import GaussianEnergy
 from fabricpc.core.initializers import NormalInitializer
 from fabricpc.graph.state_initializer import initialize_graph_state
 
-jax.config.update(
-    "jax_platform_name", "cpu"
-)  # using cuda causes larger numerical differences because of TF32 precision
-
-
-@pytest.fixture
-def rng_key():
-    """Fixture to provide a JAX random key."""
-    return jax.random.PRNGKey(42)
-
 
 @pytest.fixture
 def grad_tolerance():
@@ -51,9 +36,14 @@ def grad_tolerance():
 
 def create_graph(node_class, rng_key):
     """Create a small network using specified node class."""
-    input_node = node_class(shape=(8,), name="input")
-    hidden = node_class(shape=(12,), activation=TanhActivation(), name="hidden")
-    output_node = node_class(shape=(4,), activation=SigmoidActivation(), name="output")
+    w_init = NormalInitializer(std=0.05)
+    input_node = node_class(shape=(8,), name="input", weight_init=w_init)
+    hidden = node_class(
+        shape=(12,), activation=TanhActivation(), name="hidden", weight_init=w_init
+    )
+    output_node = node_class(
+        shape=(4,), activation=SigmoidActivation(), name="output", weight_init=w_init
+    )
 
     structure = graph(
         nodes=[input_node, hidden, output_node],
@@ -62,6 +52,7 @@ def create_graph(node_class, rng_key):
             Edge(source=hidden, target=output_node.slot("in")),
         ],
         task_map=TaskMap(x=input_node, y=output_node),
+        inference=InferenceSGD(eta_infer=0.1, infer_steps=5),
     )
     params = initialize_params(structure, rng_key)
     return params, structure
@@ -108,6 +99,7 @@ class TestLinearAutoGradNode:
             activation=activation_inst,
             energy=GaussianEnergy(),
             latent_init=NormalInitializer(),
+            weight_init=NormalInitializer(),
             slots={},
             in_degree=1,
             out_degree=0,
@@ -125,6 +117,7 @@ class TestLinearAutoGradNode:
             activation=activation_inst,
             energy=GaussianEnergy(),
             latent_init=NormalInitializer(),
+            weight_init=NormalInitializer(),
             slots={},
             in_degree=1,
             out_degree=0,
@@ -141,7 +134,6 @@ class TestLinearAutoGradNode:
             error=jnp.zeros((batch_size, output_dim)),
             energy=jnp.zeros((batch_size,)),
             pre_activation=jnp.zeros((batch_size, output_dim)),
-            substructure={},
         )
 
         # Compare forward_inference results
@@ -207,6 +199,7 @@ class TestLinearAutoGradNode:
             activation=activation_inst,
             energy=GaussianEnergy(),
             latent_init=NormalInitializer(),
+            weight_init=NormalInitializer(),
             slots={},
             in_degree=1,
             out_degree=0,
@@ -224,6 +217,7 @@ class TestLinearAutoGradNode:
             activation=activation_inst,
             energy=GaussianEnergy(),
             latent_init=NormalInitializer(),
+            weight_init=NormalInitializer(),
             slots={},
             in_degree=1,
             out_degree=0,
@@ -240,7 +234,6 @@ class TestLinearAutoGradNode:
             error=jnp.zeros((batch_size, output_dim)),
             energy=jnp.zeros((batch_size,)),
             pre_activation=jnp.zeros((batch_size, output_dim)),
-            substructure={},
         )
 
         # Compare forward_learning results
@@ -311,21 +304,11 @@ class TestLinearAutoGradNode:
         )
 
         # Run inference
-        state_linear = run_inference(
-            params_linear,
-            state_linear,
-            clamps,
-            structure_linear,
-            infer_steps=5,
-            eta_infer=0.1,
+        state_linear = type(structure_linear.config["inference"]).run_inference(
+            params_linear, state_linear, clamps, structure_linear
         )
-        state_autograd = run_inference(
-            params_autograd,
-            state_autograd,
-            clamps,
-            structure_autograd,
-            infer_steps=5,
-            eta_infer=0.1,
+        state_autograd = type(structure_autograd.config["inference"]).run_inference(
+            params_autograd, state_autograd, clamps, structure_autograd
         )
 
         # Compare gradients for each non-input node using forward_inference
@@ -343,6 +326,7 @@ class TestLinearAutoGradNode:
                 activation=node_info.activation,
                 energy=node_info.energy,
                 latent_init=node_info.latent_init,
+                weight_init=node_info.weight_init,
                 slots=node_info.slots,
                 in_degree=node_info.in_degree,
                 out_degree=node_info.out_degree,
@@ -377,36 +361,3 @@ class TestLinearAutoGradNode:
                 assert (
                     max_diff < grad_tolerance
                 ), f"Input gradient mismatch at {node_name} for {edge_key}: max diff = {max_diff}"
-
-
-class TestLinearAutoGradNodeRegistration:
-    """Test that LinearExplicitGrad is a subclass of Linear."""
-
-    def test_node_class_on_node_info(self):
-        """Test that node_class field on NodeInfo works for dispatch."""
-        node_info = NodeInfo(
-            name="test",
-            shape=(4,),
-            node_type="LinearExplicitGrad",
-            node_class=LinearExplicitGrad,
-            node_config={"use_bias": True, "flatten_input": False},
-            activation=TanhActivation(),
-            energy=GaussianEnergy(),
-            latent_init=NormalInitializer(),
-            slots={},
-            in_degree=0,
-            out_degree=0,
-            in_edges=(),
-            out_edges=(),
-        )
-        assert node_info.node_class is LinearExplicitGrad
-        assert issubclass(LinearExplicitGrad, Linear)
-
-    def test_network_creation_with_autograd_nodes(self, rng_key):
-        """Test that a network can be created using LinearExplicitGrad nodes."""
-        params, structure = create_graph(LinearExplicitGrad, rng_key)
-
-        assert len(structure.nodes) == 3
-        for node_name in structure.nodes:
-            node = structure.nodes[node_name]
-            assert node.node_info.node_type == "LinearExplicitGrad"

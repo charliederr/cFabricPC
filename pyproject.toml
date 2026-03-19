@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fabricpc"
-version = "0.2.8"
+version = "0.2.9"
 description = "A flexible, performant predictive coding library using JAX"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -47,11 +47,17 @@ tfds = [
     "tensorflow-datasets>=4.9.0",
     "tensorflow>=2.15.0",
 ]
+experiments = [
+    "scipy>=1.10.0",
+]
 viz = [
     "plotly>=5.0.0",
     "kaleido>=0.2.1",
     "pandas>=2.0.0",
     "aim>=3.0.0",
+]
+all = [
+    "fabricpc[dev,tfds,experiments,viz]",
 ]
 
 [tool.setuptools.packages.find]

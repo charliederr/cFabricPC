@@ -117,7 +117,11 @@ def initialize_params(
 
         # Initialize parameters of the node
         params_obj = node_class.initialize_params(
-            keys[key_idx], node_info.shape, input_shapes, node_info.node_config
+            keys[key_idx],
+            node_info.shape,
+            input_shapes,
+            node_info.weight_init,
+            node_info.node_config,
         )
         key_idx += 1
         node_params[node_name] = params_obj
@@ -141,5 +145,7 @@ def set_latents_to_clamps(
     """
     for node_name, clamp_value in clamps.items():
         if node_name in state.nodes:
-            state = update_node_in_state(state, node_name, z_latent=clamp_value)
+            state = update_node_in_state(
+                state, node_name, z_latent=jnp.asarray(clamp_value, dtype=jnp.float32)
+            )
     return state

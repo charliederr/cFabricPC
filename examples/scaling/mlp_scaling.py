@@ -58,9 +58,10 @@ from fabricpc.nodes import Linear
 from fabricpc.builder import Edge, TaskMap, graph
 from fabricpc.graph import initialize_params, FeedforwardStateInit
 from fabricpc.core.activations import IdentityActivation, SigmoidActivation
+from fabricpc.core.inference import InferenceSGD
+import optax
 from fabricpc.training.train import train_step
 from fabricpc.training.train_backprop import train_step_backprop
-from fabricpc.training.optimizers import create_optimizer
 
 # Reproducibility
 jax.config.update("jax_default_prng_impl", "threefry2x32")
@@ -154,6 +155,7 @@ def create_mlp_model(
         edges=edges,
         task_map=TaskMap(x=input_node, y=output_node),
         graph_state_initializer=FeedforwardStateInit(),
+        inference=InferenceSGD(eta_infer=0.1, infer_steps=INFER_STEPS),
     )
     params = initialize_params(structure, rng_key)
     return params, structure
@@ -208,18 +210,12 @@ def run_timed_training_pc(
     num_warmup: int,
 ) -> Tuple[float, int]:
     """Run PC training steps with timing, handling JIT warmup separately."""
-    optimizer = create_optimizer(
-        train_config.get("optimizer", {"type": "adam", "lr": 1e-3})
-    )
+    optimizer = optax.adam(train_config.get("lr", 1e-3))
     opt_state = optimizer.init(params)
-    infer_steps = train_config.get("infer_steps", INFER_STEPS)
-    eta_infer = train_config.get("eta_infer", 0.1)
 
     # JIT compile the training step
     jit_train_step = jax.jit(
-        lambda p, o, b, k: train_step(
-            p, o, b, structure, optimizer, k, infer_steps, eta_infer
-        )
+        lambda p, o, b, k: train_step(p, o, b, structure, optimizer, k)
     )
 
     keys = jax.random.split(rng_key, num_steps + num_warmup)
@@ -258,9 +254,7 @@ def run_timed_training_backprop(
     num_warmup: int,
 ) -> Tuple[float, int]:
     """Run backprop training steps with timing, handling JIT warmup separately."""
-    optimizer = create_optimizer(
-        train_config.get("optimizer", {"type": "adam", "lr": 1e-3})
-    )
+    optimizer = optax.adam(train_config.get("lr", 1e-3))
     opt_state = optimizer.init(params)
 
     # JIT compile the training step
@@ -336,9 +330,7 @@ def run_single_experiment(
 
     # Training config
     train_config = {
-        "infer_steps": infer_steps,
-        "eta_infer": 0.1,
-        "optimizer": {"type": "adam", "lr": 1e-3},
+        "lr": 1e-3,
     }
 
     # Run timed training based on mode

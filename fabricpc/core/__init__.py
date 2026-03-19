@@ -39,10 +39,12 @@ from fabricpc.core.energy import (
     get_energy_and_gradient,
 )
 
-# Inference functions
+# Inference functions and classes
 from fabricpc.core.inference import (
+    InferenceBase,
+    InferenceSGD,
+    InferenceSGDNormClip,
     gather_inputs,
-    inference_step,
     run_inference,
 )
 
@@ -90,8 +92,10 @@ __all__ = [
     "compute_energy_gradient",
     "get_energy_and_gradient",
     # Inference
+    "InferenceBase",
+    "InferenceSGD",
+    "InferenceSGDNormClip",
     "gather_inputs",
-    "inference_step",
     "run_inference",
     # Initializers
     "InitializerBase",
