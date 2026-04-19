@@ -291,6 +291,12 @@ def main():
         help="Override support.causal_max_effective_scale (default: config value)",
     )
     parser.add_argument(
+        "--num-columns",
+        type=int,
+        default=None,
+        help="Override total number of available columns",
+    )
+    parser.add_argument(
         "--partitioned",
         action="store_true",
         help="Use PartitionedAggregator (true architectural isolation)",
@@ -333,6 +339,14 @@ def main():
 
     if args.causal_scale is not None:
         config.support.causal_max_effective_scale = args.causal_scale
+
+    if args.num_columns is not None:
+        min_columns = config.columns.shared_columns + config.columns.topk_nonshared
+        if args.num_columns < min_columns:
+            parser.error(
+                f"num-columns must be >= {min_columns} for the current shared/topk layout"
+            )
+        config.columns.num_columns = args.num_columns
 
     if args.partitioned:
         config.columns.use_partitioned_aggregator = True
