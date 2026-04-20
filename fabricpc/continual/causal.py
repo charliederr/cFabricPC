@@ -876,31 +876,59 @@ class AgreementTracker:
         matched_actual = out_gains[order][positions[valid]][-window:]
 
         if len(matched_pred) < 4:
-            return 0.0, len(matched_pred)
+            return 0.5, len(matched_pred)
 
-        # Compute correlation as agreement measure
+        # Combine linear, rank, and directional agreement, then shrink toward
+        # neutral trust for small audit windows.
         pred_arr = np.asarray(matched_pred, dtype=np.float64)
         actual_arr = np.asarray(matched_actual, dtype=np.float64)
-
-        # Normalize to avoid scale issues
         pred_std = np.std(pred_arr)
         actual_std = np.std(actual_arr)
 
         if pred_std < 1e-8 or actual_std < 1e-8:
-            # No variance - check if signs match
-            pred_signs = np.sign(pred_arr)
-            actual_signs = np.sign(actual_arr)
-            agreement = np.mean(pred_signs == actual_signs)
-            return float(agreement), len(pred_arr)
+            linear_agreement = 0.5
+        else:
+            corr = float(np.corrcoef(pred_arr, actual_arr)[0, 1])
+            if np.isnan(corr):
+                corr = 0.0
+            linear_agreement = (corr + 1.0) / 2.0
 
-        # Correlation coefficient
-        corr = np.corrcoef(pred_arr, actual_arr)[0, 1]
-        if np.isnan(corr):
-            corr = 0.0
+        if len(pred_arr) >= 4:
+            pred_ranks = np.argsort(np.argsort(pred_arr))
+            actual_ranks = np.argsort(np.argsort(actual_arr))
+            pred_rank_std = np.std(pred_ranks)
+            actual_rank_std = np.std(actual_ranks)
+            if pred_rank_std < 1e-8 or actual_rank_std < 1e-8:
+                rank_agreement = 0.5
+            else:
+                rank_corr = float(np.corrcoef(pred_ranks, actual_ranks)[0, 1])
+                if np.isnan(rank_corr):
+                    rank_corr = 0.0
+                rank_agreement = (rank_corr + 1.0) / 2.0
+        else:
+            rank_agreement = 0.5
 
-        # Convert correlation to agreement (0 to 1 scale)
-        # corr of 1 = perfect agreement, corr of -1 = perfect disagreement
-        agreement = (corr + 1.0) / 2.0
+        gain_tol = max(
+            1e-6,
+            0.25 * float(actual_std),
+            0.10 * float(np.mean(np.abs(actual_arr))),
+        )
+        dir_mask = np.abs(actual_arr) >= gain_tol
+        if np.any(dir_mask):
+            pred_signs = np.sign(pred_arr[dir_mask])
+            actual_signs = np.sign(actual_arr[dir_mask])
+            directional_agreement = float(np.mean(pred_signs == actual_signs))
+        else:
+            directional_agreement = 0.5
+
+        raw_agreement = (
+            0.45 * linear_agreement
+            + 0.35 * rank_agreement
+            + 0.20 * directional_agreement
+        )
+        prior_count = 8.0
+        shrink = float(len(pred_arr)) / (float(len(pred_arr)) + prior_count)
+        agreement = shrink * raw_agreement + (1.0 - shrink) * 0.5
 
         self.recent_agreements.append(agreement)
         if len(self.recent_agreements) > self.max_history:
@@ -1038,26 +1066,37 @@ class CausalSelectorTrustController:
         # Coverage gate: ramps up from min_examples to target_examples
         coverage_gate = max(0.0, min(1.0, (n - min_ex) / max(1.0, target_ex - min_ex)))
 
+        smoothed_agreement = self.agreement_tracker.get_smoothed_agreement(window=8)
+        blended_agreement = 0.65 * recent_agreement + 0.35 * smoothed_agreement
+
         # Noise floor based on number of recent rows
         noise_floor = min(
             0.25, max(0.05, 1.0 / math.sqrt(max(4.0, float(recent_rows))))
         )
 
         # Agreement gate
-        if recent_agreement <= noise_floor:
+        if blended_agreement <= noise_floor:
             agreement_gate = 0.0
         else:
-            raw = (recent_agreement - noise_floor) / max(
+            raw = (blended_agreement - noise_floor) / max(
                 1e-6, self.config.causal_agreement_target - noise_floor
             )
             agreement_gate = math.sqrt(max(0.0, min(1.0, raw)))
 
+        # Once a minimum amount of audited evidence exists and the signal is not
+        # anti-correlated, permit a muted trust floor so one-swap maintenance can
+        # actually participate under exact-audited safeguards.
+        support_rows = max(1.0, min_ex / 2.0)
+        evidence_gate = max(0.0, min(1.0, float(recent_rows) / support_rows))
+        if blended_agreement >= 0.45:
+            agreement_gate = max(agreement_gate, 0.35 * evidence_gate)
+
         # Trend gate: penalizes drops in agreement
         if self.agreement_ema is None:
-            self.agreement_ema = recent_agreement
-        trend_drop = max(0.0, self.agreement_ema - recent_agreement)
+            self.agreement_ema = blended_agreement
+        trend_drop = max(0.0, self.agreement_ema - blended_agreement)
         trend_gate = math.exp(-trend_drop / max(1e-6, self.config.causal_trend_tau))
-        self.agreement_ema = 0.75 * self.agreement_ema + 0.25 * recent_agreement
+        self.agreement_ema = 0.75 * self.agreement_ema + 0.25 * blended_agreement
 
         # Structural gate: bounded internal trust
         structural_gate = max(
@@ -1090,6 +1129,9 @@ class CausalSelectorTrustController:
             "trend_gate": float(trend_gate),
             "structural_gate": float(structural_gate),
             "noise_floor": float(noise_floor),
+            "recent_agreement": float(recent_agreement),
+            "smoothed_agreement": float(smoothed_agreement),
+            "blended_agreement": float(blended_agreement),
             "effective_scale": float(effective_scale),
             "mix_gate": float(mix_gate),
         }

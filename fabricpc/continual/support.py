@@ -815,7 +815,7 @@ class SupportManager:
         effective_scale = float(diag.get("effective_scale", 0.0))
 
         # If trusted causal influence is too low, skip causal guidance.
-        if mix_gate < 0.05 or effective_scale <= 1e-8:
+        if mix_gate < 0.02 or effective_scale <= 1e-8:
             return tuple(initial_selected)
 
         # Get fingerprint data for feature building
