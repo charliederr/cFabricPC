@@ -851,8 +851,9 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
 
         cfg.support.causal_min_examples = 8
         cfg.support.causal_target_examples = 24
-        cfg.audit.audit_batches_per_task = 1
-        cfg.audit.support_swap_audit_max_swaps = 2
+        cfg.support.causal_agreement_target = 0.25
+        cfg.audit.audit_batches_per_task = 2
+        cfg.audit.support_swap_audit_max_swaps = 4
         cfg.audit.support_audit_max_batches = 1
     else:
         cfg.training.epochs_per_task = 3
@@ -879,11 +880,12 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.shell_demotion_transweave.allow_inner_shell_transitions = False
         cfg.shell_demotion_transweave.middle_shell_boundary_only = True
 
-        cfg.support.causal_min_examples = 24
-        cfg.support.causal_target_examples = 90
-        cfg.audit.audit_batches_per_task = 1
-        cfg.audit.support_swap_audit_enable = False
-        cfg.audit.support_swap_audit_max_swaps = 0
+        cfg.support.causal_min_examples = 16
+        cfg.support.causal_target_examples = 60
+        cfg.support.causal_agreement_target = 0.25
+        cfg.audit.audit_batches_per_task = 2
+        cfg.audit.support_swap_audit_enable = True
+        cfg.audit.support_swap_audit_max_swaps = 4
         cfg.audit.support_audit_max_batches = 1
 
     cfg.support.topk_nonshared = cfg.columns.topk_nonshared

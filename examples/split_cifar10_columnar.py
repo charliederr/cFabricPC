@@ -309,10 +309,34 @@ def main():
         "--num-columns", type=int, default=None, help="Override total columns"
     )
     parser.add_argument(
+        "--shared-columns", type=int, default=None, help="Override shared columns"
+    )
+    parser.add_argument(
+        "--topk-nonshared",
+        type=int,
+        default=None,
+        help="Override active non-shared columns per task",
+    )
+    parser.add_argument(
         "--memory-dim", type=int, default=None, help="Override column width"
     )
     parser.add_argument(
         "--causal-scale", type=float, default=None, help="Override causal scale"
+    )
+    parser.add_argument(
+        "--ewc", action="store_true", help="Enable EWC retention regularization"
+    )
+    parser.add_argument(
+        "--ewc-lambda",
+        type=float,
+        default=None,
+        help="Override EWC regularization strength",
+    )
+    parser.add_argument(
+        "--ewc-fisher-samples",
+        type=int,
+        default=None,
+        help="Override the number of samples used for Fisher estimation",
     )
     args = parser.parse_args()
 
@@ -327,6 +351,12 @@ def main():
         config.training.epochs_per_task = args.epochs
     if args.num_columns is not None:
         config.columns.num_columns = args.num_columns
+    if args.shared_columns is not None:
+        config.columns.shared_columns = args.shared_columns
+    if args.topk_nonshared is not None:
+        config.columns.topk_nonshared = args.topk_nonshared
+        config.support.topk_nonshared = args.topk_nonshared
+    if args.num_columns is not None or args.shared_columns is not None:
         config.columns.adaptive_columns = max(
             config.columns.num_columns
             - config.columns.shared_columns
@@ -337,6 +367,14 @@ def main():
         config.columns.memory_dim = args.memory_dim
     if args.causal_scale is not None:
         config.support.causal_max_effective_scale = args.causal_scale
+    if args.ewc:
+        config.ewc.enable = True
+    if args.ewc_lambda is not None:
+        config.ewc.enable = True
+        config.ewc.lambda_ewc = args.ewc_lambda
+    if args.ewc_fisher_samples is not None:
+        config.ewc.enable = True
+        config.ewc.fisher_samples = args.ewc_fisher_samples
 
     print("\nConfiguration:")
     print(f"  Epochs per task: {config.training.epochs_per_task}")
@@ -353,6 +391,9 @@ def main():
     print(f"  Task-local head: {config.training.task_local_head}")
     print(f"  Light augmentation: {config.training.use_light_augmentation}")
     print(f"  Causal scale: {config.support.causal_max_effective_scale}")
+    print(f"  EWC enabled: {config.ewc.enable}")
+    print(f"  EWC lambda: {config.ewc.lambda_ewc}")
+    print(f"  EWC Fisher samples: {config.ewc.fisher_samples}")
 
     jax.config.update("jax_default_prng_impl", "threefry2x32")
     master_key = jax.random.PRNGKey(config.seed)
