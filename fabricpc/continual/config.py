@@ -881,9 +881,10 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
 
         cfg.support.causal_min_examples = 24
         cfg.support.causal_target_examples = 90
-        cfg.audit.audit_batches_per_task = 2
-        cfg.audit.support_swap_audit_max_swaps = 12
-        cfg.audit.support_audit_max_batches = 2
+        cfg.audit.audit_batches_per_task = 1
+        cfg.audit.support_swap_audit_enable = False
+        cfg.audit.support_swap_audit_max_swaps = 0
+        cfg.audit.support_audit_max_batches = 1
 
     cfg.support.topk_nonshared = cfg.columns.topk_nonshared
     cfg.support.adaptive_columns = cfg.columns.adaptive_columns
