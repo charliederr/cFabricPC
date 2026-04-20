@@ -1,8 +1,8 @@
 """
-Split-CIFAR-100 Data Loading for Continual Learning.
+Split-CIFAR Data Loading for Continual Learning.
 
 Provides JAX-compatible data loaders for sequential task learning on
-CIFAR-100 split into groups of classes. Structured to mirror the Split-MNIST
+CIFAR-10 / CIFAR-100 split into groups of classes. Structured to mirror the Split-MNIST
 loader in ``fabricpc.continual.data`` so the same SequentialTrainer can
 consume it unchanged.
 """
@@ -14,8 +14,39 @@ import numpy as np
 from fabricpc.utils.data.data_utils import one_hot
 from fabricpc.continual.data import TaskData
 
+CIFAR10_MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
+CIFAR10_STD = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
 CIFAR100_MEAN = np.array([0.5071, 0.4865, 0.4409], dtype=np.float32)
 CIFAR100_STD = np.array([0.2673, 0.2564, 0.2762], dtype=np.float32)
+
+
+def _light_cifar_augment(
+    images: np.ndarray,
+    rng: np.random.Generator,
+    pad: int = 4,
+) -> np.ndarray:
+    """Apply light CIFAR augmentation: horizontal flip + reflect-padded random crop."""
+    images = images.copy()
+    batch_size, height, width, _ = images.shape
+
+    flip_mask = rng.random(batch_size) > 0.5
+    images[flip_mask] = images[flip_mask, :, ::-1, :]
+
+    padded = np.pad(
+        images,
+        ((0, 0), (pad, pad), (pad, pad), (0, 0)),
+        mode="reflect",
+    )
+    crop_y = rng.integers(0, 2 * pad + 1, size=batch_size)
+    crop_x = rng.integers(0, 2 * pad + 1, size=batch_size)
+    for idx in range(batch_size):
+        images[idx] = padded[
+            idx,
+            crop_y[idx] : crop_y[idx] + height,
+            crop_x[idx] : crop_x[idx] + width,
+            :,
+        ]
+    return images
 
 
 class SplitCifar100TaskLoader:
@@ -35,6 +66,9 @@ class SplitCifar100TaskLoader:
         seed: Optional[int] = None,
         tensor_format: str = "flat",
         num_classes: int = 100,
+        mean: np.ndarray = CIFAR100_MEAN,
+        std: np.ndarray = CIFAR100_STD,
+        augment: bool = False,
     ):
         self.images = images
         self.labels = labels
@@ -43,6 +77,9 @@ class SplitCifar100TaskLoader:
         self.seed = seed
         self.tensor_format = tensor_format
         self.num_classes = num_classes
+        self.mean = mean
+        self.std = std
+        self.augment = augment
 
         self._epoch = 0
         self._num_samples = len(images)
@@ -65,7 +102,10 @@ class SplitCifar100TaskLoader:
             batch_images = self.images[batch_idx].astype(np.float32)
             batch_labels = self.labels[batch_idx]
 
-            batch_images = (batch_images - CIFAR100_MEAN) / CIFAR100_STD
+            if self.augment:
+                batch_images = _light_cifar_augment(batch_images, rng)
+
+            batch_images = (batch_images - self.mean) / self.std
 
             if self.tensor_format == "flat":
                 batch_images = batch_images.reshape(len(batch_idx), -1)
@@ -142,6 +182,76 @@ def _load_cifar100_manual(data_root: str):
 
     train_images, train_labels = _reshape(train)
     test_images, test_labels = _reshape(test)
+    return train_images, train_labels, test_images, test_labels
+
+
+def _load_cifar10_keras():
+    """Load CIFAR-10 via keras.datasets."""
+    try:
+        from tensorflow.keras.datasets import cifar10
+
+        (train_images, train_labels), (test_images, test_labels) = cifar10.load_data()
+        return train_images, train_labels, test_images, test_labels
+    except ImportError:
+        return None
+    except Exception as e:
+        print(
+            f"Keras CIFAR-10 load failed ({type(e).__name__}: {e}); "
+            "falling back to manual download."
+        )
+        return None
+
+
+def _load_cifar10_manual(data_root: str):
+    """Download CIFAR-10 python tarball and parse it without any TF dependency."""
+    import os
+    import tarfile
+    import pickle
+    import shutil
+    import urllib.request
+    import ssl
+
+    url = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+    tar_path = os.path.join(data_root, "cifar-10-python.tar.gz")
+    extract_dir = os.path.join(data_root, "cifar-10-batches-py")
+    os.makedirs(data_root, exist_ok=True)
+
+    if not os.path.exists(extract_dir):
+        if not os.path.exists(tar_path):
+            print("Downloading CIFAR-10 (~170MB)...")
+            try:
+                import certifi
+
+                context = ssl.create_default_context(cafile=certifi.where())
+            except ImportError:
+                context = ssl.create_default_context()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=context)
+            )
+            with opener.open(url) as response, open(tar_path, "wb") as out:
+                shutil.copyfileobj(response, out)
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(data_root)
+
+    def _unpickle(path):
+        with open(path, "rb") as f:
+            return pickle.load(f, encoding="bytes")
+
+    train_batches = []
+    train_labels = []
+    for batch_idx in range(1, 6):
+        batch = _unpickle(os.path.join(extract_dir, f"data_batch_{batch_idx}"))
+        train_batches.append(batch[b"data"])
+        train_labels.extend(batch[b"labels"])
+
+    test_batch = _unpickle(os.path.join(extract_dir, "test_batch"))
+
+    train_images = np.concatenate(train_batches, axis=0)
+    train_images = train_images.reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+    train_labels = np.asarray(train_labels, dtype=np.int32)
+
+    test_images = test_batch[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+    test_labels = np.asarray(test_batch[b"labels"], dtype=np.int32)
     return train_images, train_labels, test_images, test_labels
 
 
@@ -243,6 +353,107 @@ class SplitCifar100Loader:
         return self.tasks[idx]
 
 
+class SplitCifar10Loader:
+    """
+    Load CIFAR-10 split into sequential tasks by class groups.
+
+    Default protocol is 5 tasks of 2 classes each:
+    ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9)).
+    """
+
+    def __init__(
+        self,
+        class_groups: Optional[Sequence[Sequence[int]]] = None,
+        batch_size: int = 256,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+        tensor_format: str = "flat",
+        data_root: str = "./data",
+        num_classes: int = 10,
+        augment_train: bool = False,
+    ):
+        if class_groups is None:
+            class_groups = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+        self.class_groups = [tuple(g) for g in class_groups]
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
+        self.tensor_format = tensor_format
+        self.num_classes = num_classes
+        self.augment_train = augment_train
+
+        self._load_cifar10(data_root)
+
+        self.tasks: List[TaskData] = []
+        for task_id, classes in enumerate(self.class_groups):
+            self.tasks.append(self._create_task(task_id, classes))
+
+    def _load_cifar10(self, data_root: str):
+        result = _load_cifar10_keras()
+        if result is None:
+            result = _load_cifar10_manual(data_root)
+        train_images, train_labels, test_images, test_labels = result
+
+        self._train_images = train_images.astype(np.float32) / 255.0
+        self._train_labels = np.asarray(train_labels, dtype=np.int32).reshape(-1)
+        self._test_images = test_images.astype(np.float32) / 255.0
+        self._test_labels = np.asarray(test_labels, dtype=np.int32).reshape(-1)
+
+    def _create_task(self, task_id: int, classes: Sequence[int]) -> TaskData:
+        class_set = set(int(c) for c in classes)
+
+        train_mask = np.isin(self._train_labels, list(class_set))
+        train_images = self._train_images[train_mask]
+        train_labels = self._train_labels[train_mask]
+
+        test_mask = np.isin(self._test_labels, list(class_set))
+        test_images = self._test_images[test_mask]
+        test_labels = self._test_labels[test_mask]
+
+        task_seed = self.seed + task_id if self.seed is not None else None
+
+        train_loader = SplitCifar100TaskLoader(
+            images=train_images,
+            labels=train_labels,
+            batch_size=self.batch_size,
+            shuffle=self.shuffle,
+            seed=task_seed,
+            tensor_format=self.tensor_format,
+            num_classes=self.num_classes,
+            mean=CIFAR10_MEAN,
+            std=CIFAR10_STD,
+            augment=self.augment_train,
+        )
+        test_loader = SplitCifar100TaskLoader(
+            images=test_images,
+            labels=test_labels,
+            batch_size=self.batch_size,
+            shuffle=False,
+            seed=task_seed,
+            tensor_format=self.tensor_format,
+            num_classes=self.num_classes,
+            mean=CIFAR10_MEAN,
+            std=CIFAR10_STD,
+            augment=False,
+        )
+
+        return TaskData(
+            task_id=task_id,
+            classes=tuple(classes),
+            train_loader=train_loader,
+            test_loader=test_loader,
+        )
+
+    def __iter__(self) -> Iterator[TaskData]:
+        return iter(self.tasks)
+
+    def __len__(self) -> int:
+        return len(self.tasks)
+
+    def __getitem__(self, idx: int) -> TaskData:
+        return self.tasks[idx]
+
+
 def build_split_cifar100_loaders(
     config,
     data_root: str = "./data",
@@ -264,5 +475,23 @@ def build_split_cifar100_loaders(
         tensor_format="flat",
         data_root=data_root,
         num_classes=getattr(config, "num_output_classes", 100),
+    )
+    return loader.tasks
+
+
+def build_split_cifar10_loaders(
+    config,
+    data_root: str = "./data",
+) -> List[TaskData]:
+    """Build Split-CIFAR-10 task loaders from an ExperimentConfig."""
+    loader = SplitCifar10Loader(
+        class_groups=config.task_pairs,
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        seed=config.seed,
+        tensor_format="NHWC",
+        data_root=data_root,
+        num_classes=getattr(config, "num_output_classes", 10),
+        augment_train=getattr(config.training, "use_light_augmentation", False),
     )
     return loader.tasks

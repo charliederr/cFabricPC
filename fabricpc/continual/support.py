@@ -356,6 +356,9 @@ class HybridSelectorPolicy:
         exploration_rate: float = 0.1,
         diversify_columns: bool = True,
         diversification_penalty: float = 2.0,
+        candidate_pool: Optional[Sequence[int]] = None,
+        reserve_columns: Optional[Sequence[int]] = None,
+        reserve_bonus_scale: float = 0.0,
     ) -> Tuple[int, ...]:
         """
         Select non-shared support columns for a task.
@@ -372,7 +375,12 @@ class HybridSelectorPolicy:
         Returns:
             Tuple of selected non-shared column indices
         """
-        nonshared_pool = np.arange(self.num_shared, self.num_columns, dtype=np.int32)
+        if candidate_pool is None:
+            nonshared_pool = np.arange(
+                self.num_shared, self.num_columns, dtype=np.int32
+            )
+        else:
+            nonshared_pool = np.asarray(candidate_pool, dtype=np.int32)
 
         # Remove demoted columns
         if demotion_bank is not None:
@@ -413,6 +421,11 @@ class HybridSelectorPolicy:
                             pool_idx = np.where(nonshared_pool == col)[0]
                             if pool_idx.size > 0:
                                 scores[pool_idx[0]] -= diversification_penalty
+
+        if reserve_columns is not None and reserve_bonus_scale > 0.0:
+            reserve_columns = np.asarray(reserve_columns, dtype=np.int32)
+            reserve_mask = np.isin(nonshared_pool, reserve_columns)
+            scores[reserve_mask] += reserve_bonus_scale
 
         # 5. Random exploration
         if np.random.random() < exploration_rate:
@@ -563,6 +576,30 @@ class SupportManager:
         self.topk_nonshared = topk_nonshared
         self.config = config
         self.num_tasks = num_tasks
+        if config is not None:
+            adaptive_columns = int(getattr(config, "adaptive_columns", 0) or 0)
+            reserve_columns = int(getattr(config, "reserve_columns", 0) or 0)
+        else:
+            adaptive_columns = 0
+            reserve_columns = 0
+        total_nonshared = self.num_columns - self.num_shared
+        if adaptive_columns <= 0 and reserve_columns <= 0:
+            adaptive_columns = total_nonshared
+            reserve_columns = 0
+        elif adaptive_columns <= 0:
+            adaptive_columns = max(total_nonshared - reserve_columns, 0)
+        elif reserve_columns <= 0:
+            reserve_columns = max(total_nonshared - adaptive_columns, 0)
+        adaptive_columns = min(adaptive_columns, total_nonshared)
+        reserve_columns = min(reserve_columns, total_nonshared - adaptive_columns)
+        self.adaptive_columns = adaptive_columns
+        self.reserve_columns = reserve_columns
+        adaptive_start = self.num_shared
+        reserve_start = adaptive_start + self.adaptive_columns
+        self._adaptive_pool = tuple(range(adaptive_start, reserve_start))
+        self._reserve_pool = tuple(
+            range(reserve_start, reserve_start + self.reserve_columns)
+        )
 
         # Initialize components
         self.support_bank = SupportBank()
@@ -615,21 +652,23 @@ class SupportManager:
         """
         # For continual learning, use sequential column assignment first
         # to maximize column isolation between tasks
-        num_nonshared = self.num_columns - self.num_shared
         columns_per_task = self.topk_nonshared
+        adaptive_pool = self._adaptive_pool
+        reserve_pool = self._reserve_pool
 
         # Determine if we can assign fresh columns to this task
-        # Tasks 0, 1, 2, ... get columns [2,3], [4,5], [6,7], etc.
-        # until we run out of fresh columns
-        max_isolated_tasks = num_nonshared // columns_per_task
+        max_isolated_tasks = (
+            len(adaptive_pool) // columns_per_task if columns_per_task > 0 else 0
+        )
 
         if task_id < max_isolated_tasks:
             # Assign fresh non-shared columns sequentially
-            start_col = self.num_shared + task_id * columns_per_task
-            selected = tuple(range(start_col, start_col + columns_per_task))
+            start_idx = task_id * columns_per_task
+            selected = tuple(adaptive_pool[start_idx : start_idx + columns_per_task])
         else:
             # Out of fresh columns, use policy or baseline with recycling
             use_policy = self.trust_controller.should_use_policy()
+            candidate_pool = adaptive_pool + reserve_pool
 
             if use_policy:
                 selected = self.selector_policy.select_support(
@@ -637,12 +676,39 @@ class SupportManager:
                     support_bank=self.support_bank,
                     demotion_bank=self.demotion_bank,
                     current_features=features,
+                    candidate_pool=candidate_pool,
+                    reserve_columns=reserve_pool,
+                    reserve_bonus_scale=(
+                        self.config.reserve_bonus_scale if self.config else 0.0
+                    ),
                 )
             else:
-                # Baseline: cycle through available columns
-                cycle_idx = task_id % max_isolated_tasks
-                start_col = self.num_shared + cycle_idx * columns_per_task
-                selected = tuple(range(start_col, start_col + columns_per_task))
+                # Baseline: cycle through adaptive columns, then draw reserves if configured.
+                if max_isolated_tasks > 0:
+                    cycle_idx = task_id % max_isolated_tasks
+                    start_idx = cycle_idx * columns_per_task
+                    selected = tuple(
+                        adaptive_pool[start_idx : start_idx + columns_per_task]
+                    )
+                else:
+                    selected = tuple(candidate_pool[:columns_per_task])
+
+        min_reserve = (
+            int(getattr(self.config, "reserve_min_usage", 0) or 0) if self.config else 0
+        )
+        if reserve_pool and min_reserve > 0:
+            reserve_selected = [col for col in selected if col in reserve_pool]
+            if len(reserve_selected) < min_reserve:
+                selected_list = [col for col in selected if col not in reserve_pool]
+                needed = min_reserve - len(reserve_selected)
+                reserve_candidates = [
+                    col for col in reserve_pool if col not in selected
+                ]
+                selected = tuple(
+                    selected_list[: max(0, columns_per_task - min_reserve)]
+                    + reserve_selected
+                    + reserve_candidates[:needed]
+                )[:columns_per_task]
 
         # Apply causal guidance if available and configured
         if self.config is not None and self.config.causal_max_effective_scale > 0:
@@ -672,6 +738,53 @@ class SupportManager:
 
         return self.current_state
 
+    def get_support_diagnostics(
+        self,
+        task_id: int,
+        support_cols: Sequence[int],
+    ) -> Dict[str, float]:
+        """Compute support overlap / entropy / reserve-use diagnostics."""
+        support_cols = tuple(int(col) for col in support_cols)
+        nonshared = [col for col in support_cols if col >= self.num_shared]
+        reserve_count = sum(col in self._reserve_pool for col in nonshared)
+
+        overlap_values = []
+        usage = np.zeros((max(self.num_columns, 1),), dtype=np.float64)
+        for row in self.support_bank.rows:
+            row_nonshared = tuple(
+                col for col in row.support_cols if col >= self.num_shared
+            )
+            if row_nonshared:
+                for col in row_nonshared:
+                    if 0 <= col < usage.shape[0]:
+                        usage[col] += 1.0
+                overlap = len(set(row_nonshared) & set(nonshared)) / max(
+                    len(set(row_nonshared) | set(nonshared)), 1
+                )
+                overlap_values.append(overlap)
+
+        adaptive_usage = usage[
+            self.num_shared : self.num_shared + self.adaptive_columns
+        ]
+        total_usage = adaptive_usage.sum()
+        if total_usage > 0:
+            p = adaptive_usage / total_usage
+            support_entropy = float(-np.sum(p[p > 0] * np.log(p[p > 0])))
+        else:
+            support_entropy = 0.0
+
+        return {
+            "support_overlap_mean": (
+                float(np.mean(overlap_values)) if overlap_values else 0.0
+            ),
+            "support_entropy": support_entropy,
+            "reserve_fraction": (
+                reserve_count / max(len(nonshared), 1) if nonshared else 0.0
+            ),
+            "adaptive_pool_size": float(self.adaptive_columns),
+            "reserve_pool_size": float(self.reserve_columns),
+        }
+
     def _apply_causal_guidance(
         self,
         task_id: int,
@@ -698,10 +811,11 @@ class SupportManager:
 
         # Get current trust state
         diag = self.causal_trust.last_diag
-        mix_gate = diag.get("mix_gate", 0.0)
+        mix_gate = float(diag.get("mix_gate", 0.0))
+        effective_scale = float(diag.get("effective_scale", 0.0))
 
-        # If mix_gate is too low, skip causal guidance
-        if mix_gate < 0.05:
+        # If trusted causal influence is too low, skip causal guidance.
+        if mix_gate < 0.05 or effective_scale <= 1e-8:
             return tuple(initial_selected)
 
         # Get fingerprint data for feature building
@@ -766,13 +880,14 @@ class SupportManager:
             fingerprint_confidence=fp_conf,
             current_task_id=task_id,
         )
-        candidate_pred = self.causal_predictor.predict(candidate_features)
+        candidate_pred = (
+            self.causal_predictor.predict(candidate_features) * effective_scale
+        )
         candidate_order = np.argsort(candidate_pred)[::-1]
 
-        # Consider swapping in top candidates if they score well
-        # Use mix_gate to control how aggressive we are
+        # Consider swapping in top candidates if they score well.
         selected = list(initial_selected)
-        swap_threshold = 0.01 * mix_gate  # Higher mix_gate = lower threshold
+        swap_threshold = 0.01 * max(0.1, 1.0 - mix_gate)
 
         chosen_contexts = [tuple(c for c in selected if c != col) for col in selected]
         chosen_features = self.causal_feature_builder.build_features_batch(
@@ -792,7 +907,7 @@ class SupportManager:
             fingerprint_confidence=fp_conf,
             current_task_id=task_id,
         )
-        chosen_pred = self.causal_predictor.predict(chosen_features)
+        chosen_pred = self.causal_predictor.predict(chosen_features) * effective_scale
         worst_idx = int(np.argmin(chosen_pred))
         worst_score = float(chosen_pred[worst_idx])
 

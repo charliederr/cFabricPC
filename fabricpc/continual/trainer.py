@@ -59,6 +59,9 @@ class TaskRunSummary:
     epochs_trained: int
     training_time: float
     support_cols: Tuple[int, ...]
+    support_overlap_mean: float = 0.0
+    support_entropy: float = 0.0
+    reserve_fraction: float = 0.0
 
     # Optional detailed metrics
     accuracy_per_class: Optional[Dict[int, float]] = None
@@ -113,6 +116,9 @@ class TaskRunSummary:
             "epochs_trained": self.epochs_trained,
             "training_time": float(self.training_time),
             "support_cols": list(self.support_cols),
+            "support_overlap_mean": float(self.support_overlap_mean),
+            "support_entropy": float(self.support_entropy),
+            "reserve_fraction": float(self.reserve_fraction),
             "epoch_accuracies": self.epoch_accuracies,
             "epoch_losses": self.epoch_losses,
             "selector_policy_used": self.selector_policy_used,
@@ -717,14 +723,16 @@ class SequentialTrainer:
             "num_epochs": self.config.training.epochs_per_task,
             "loss_type": "cross_entropy",
         }
+        if self.config.training.task_local_head:
+            train_config["active_classes"] = list(task_data.classes)
 
         # Apply fast dev limits if set
         max_train_batches = self.config.training.fast_dev_max_train_batches
         max_test_batches = self.config.training.fast_dev_max_test_batches
 
         # Create limited loaders if needed
-        train_loader = task_data.train_loader
-        test_loader = task_data.test_loader
+        train_loader = self._limit_loader(task_data.train_loader, max_train_batches)
+        test_loader = self._limit_loader(task_data.test_loader, max_test_batches)
 
         # Track epoch metrics
         epoch_accuracies = []
@@ -762,7 +770,7 @@ class SequentialTrainer:
         train_key, self.rng_key = jax.random.split(self.rng_key)
 
         if self.training_mode == "backprop":
-            self.params, loss_history, _, self.opt_state = train_backprop(
+            self.params, loss_history, _ = train_backprop(
                 params=self.params,
                 structure=self.structure,
                 train_loader=train_loader,
@@ -771,11 +779,9 @@ class SequentialTrainer:
                 rng_key=train_key,
                 verbose=verbose,
                 epoch_callback=epoch_callback,
-                opt_state=self.opt_state,
-                return_opt_state=True,
             )
         else:  # PC mode or hybrid (default to PC)
-            self.params, energy_history, _, self.opt_state = train_pcn(
+            self.params, energy_history, _ = train_pcn(
                 params=self.params,
                 structure=self.structure,
                 train_loader=train_loader,
@@ -784,28 +790,38 @@ class SequentialTrainer:
                 rng_key=train_key,
                 verbose=verbose,
                 epoch_callback=epoch_callback,
-                opt_state=self.opt_state,
-                return_opt_state=True,
             )
+
+        # The local training API owns optimizer-state lifecycle internally.
+        # Reinitialize here so checkpoints keep an optimizer state aligned to
+        # the post-task parameters in this trainer checkout.
+        self.opt_state = self.optimizer.init(self.params)
 
         training_time = time.time() - start_time
 
         # Final evaluation
         eval_key, self.rng_key = jax.random.split(self.rng_key)
+        eval_config = {"loss_type": "cross_entropy"}
+        if self.config.training.task_local_head:
+            eval_config["active_classes"] = list(task_data.classes)
         if self.training_mode == "backprop":
             train_metrics = evaluate_backprop(
-                self.params, self.structure, train_loader, train_config, eval_key
+                self.params, self.structure, train_loader, eval_config, eval_key
             )
             test_metrics = evaluate_backprop(
-                self.params, self.structure, test_loader, train_config, eval_key
+                self.params, self.structure, test_loader, eval_config, eval_key
             )
         else:
             train_metrics = evaluate_pcn(
-                self.params, self.structure, train_loader, train_config, eval_key
+                self.params, self.structure, train_loader, eval_config, eval_key
             )
             test_metrics = evaluate_pcn(
-                self.params, self.structure, test_loader, train_config, eval_key
+                self.params, self.structure, test_loader, eval_config, eval_key
             )
+
+        support_diag = self.support_manager.get_support_diagnostics(
+            task_id, support_cols
+        )
 
         # Run support swap audit for causal learning
         old_task_data = self.tasks[-1] if len(self.tasks) > 0 else None
@@ -866,6 +882,9 @@ class SequentialTrainer:
             epochs_trained=self.config.training.epochs_per_task,
             training_time=training_time,
             support_cols=support_cols,
+            support_overlap_mean=float(support_diag.get("support_overlap_mean", 0.0)),
+            support_entropy=float(support_diag.get("support_entropy", 0.0)),
+            reserve_fraction=float(support_diag.get("reserve_fraction", 0.0)),
             epoch_accuracies=epoch_accuracies,
             epoch_losses=epoch_losses,
             selector_policy_used=self.support_manager.trust_controller.should_use_policy(),
@@ -933,6 +952,9 @@ class SequentialTrainer:
             print(f"  Train accuracy: {summary.train_accuracy:.4f}")
             print(f"  Test accuracy:  {summary.test_accuracy:.4f}")
             print(f"  Training time:  {training_time:.1f}s")
+            print(f"  Support overlap: {summary.support_overlap_mean:.4f}")
+            print(f"  Support entropy: {summary.support_entropy:.4f}")
+            print(f"  Reserve frac:    {summary.reserve_fraction:.4f}")
             if summary.causal_selector_examples > 0:
                 print(f"  Causal examples: {summary.causal_selector_examples:.0f}")
                 print(f"  Causal corr:     {summary.causal_selector_corr:.4f}")
@@ -998,7 +1020,12 @@ class SequentialTrainer:
         total_correct = 0
         total_samples = 0
 
-        for batch_idx, batch_data in enumerate(task_data.test_loader):
+        test_loader = self._limit_loader(
+            task_data.test_loader,
+            self.config.training.fast_dev_max_test_batches,
+        )
+
+        for batch_idx, batch_data in enumerate(test_loader):
             # Convert batch
             if isinstance(batch_data, (list, tuple)):
                 batch = {"x": jnp.array(batch_data[0]), "y": jnp.array(batch_data[1])}
@@ -1101,6 +1128,34 @@ class SequentialTrainer:
             batches.append((np.asarray(images), np.asarray(labels)))
         return batches
 
+    def _limit_loader(self, loader, max_batches: Optional[int]):
+        """Wrap a loader so fast-dev modes can cap iteration and reported length."""
+        if max_batches is None:
+            return loader
+
+        try:
+            loader_len = len(loader)
+        except TypeError:
+            loader_len = max_batches
+
+        capped_len = max(0, min(int(max_batches), int(loader_len)))
+
+        class _LimitedLoader:
+            def __init__(self, base_loader, limit: int):
+                self._base_loader = base_loader
+                self._limit = limit
+
+            def __len__(self):
+                return self._limit
+
+            def __iter__(self):
+                for batch_idx, batch in enumerate(self._base_loader):
+                    if batch_idx >= self._limit:
+                        break
+                    yield batch
+
+        return _LimitedLoader(loader, capped_len)
+
     def _coalesce_batches(
         self,
         batches: List[Tuple[np.ndarray, np.ndarray]],
@@ -1147,6 +1202,7 @@ class SequentialTrainer:
         batches: List[Tuple[np.ndarray, np.ndarray]],
         task_id: int,
         support_cols: Tuple[int, ...],
+        active_classes: Optional[Tuple[int, ...]] = None,
     ) -> float:
         """Evaluate loss on sampled batches under a specific support selection."""
         if not batches:
@@ -1156,6 +1212,15 @@ class SequentialTrainer:
         eval_key, self.rng_key = jax.random.split(self.rng_key)
         self._set_task_context(task_id, support_cols)
         eval_config = {"loss_type": "cross_entropy"}
+        if self.config.training.task_local_head:
+            task_classes = active_classes
+            if task_classes is None:
+                task_classes = next(
+                    (task.classes for task in self.tasks if task.task_id == task_id),
+                    None,
+                )
+            if task_classes is not None:
+                eval_config["active_classes"] = list(task_classes)
 
         if self.training_mode == "backprop":
             metrics = evaluate_backprop(
@@ -1425,11 +1490,19 @@ class SequentialTrainer:
         # Baseline loss with current support
         baseline_support = self.current_state.active_all
         baseline_current_loss = self._evaluate_loss_on_batches(
-            current_batches, current_task_id, baseline_support
+            current_batches,
+            current_task_id,
+            baseline_support,
+            active_classes=current_task_data.classes,
         )
         baseline_old_loss = (
             self._evaluate_loss_on_batches(
-                old_batches, current_task_id, baseline_support
+                old_batches,
+                current_task_id,
+                baseline_support,
+                active_classes=(
+                    old_task_data.classes if old_task_data is not None else None
+                ),
             )
             if old_batches
             else 0.0
@@ -1472,11 +1545,19 @@ class SequentialTrainer:
             )
 
             alt_current_loss = self._evaluate_loss_on_batches(
-                current_batches, current_task_id, alt_support
+                current_batches,
+                current_task_id,
+                alt_support,
+                active_classes=current_task_data.classes,
             )
             alt_old_loss = (
                 self._evaluate_loss_on_batches(
-                    old_batches, current_task_id, alt_support
+                    old_batches,
+                    current_task_id,
+                    alt_support,
+                    active_classes=(
+                        old_task_data.classes if old_task_data is not None else None
+                    ),
                 )
                 if old_batches
                 else 0.0
@@ -1735,16 +1816,44 @@ class SequentialTrainer:
                         column_activities[col_id].shape[0]
                     )
 
+            shell_cfg = self.config.shell_demotion_transweave
+            warmup_done = self.global_step >= shell_cfg.warmup_steps
+
             for col_id in range(num_columns):
                 history = self.transweave_manager.shell_transweave.column_histories.get(
                     col_id, []
                 )
-                if history:
+                if history and warmup_done:
                     result = self.transweave_manager.shell_transweave.compute_demotion_transport(
                         column_id=col_id,
                         current_activities=column_activities[col_id],
                         current_assignments=column_assignments[col_id],
                     )
+                    demotion_candidates = list(result.demotion_candidates)
+                    promotion_candidates = list(result.promotion_candidates)
+
+                    if not shell_cfg.allow_inner_shell_transitions:
+                        demotion_candidates = [
+                            cand for cand in demotion_candidates if cand[1] != 0
+                        ]
+                        promotion_candidates = [
+                            cand for cand in promotion_candidates if cand[2] != 0
+                        ]
+
+                    if shell_cfg.middle_shell_boundary_only:
+                        demotion_candidates = [
+                            cand for cand in demotion_candidates if cand[1] != 1
+                        ]
+                        promotion_candidates = [
+                            cand for cand in promotion_candidates if cand[2] != 1
+                        ]
+
+                    result = replace(
+                        result,
+                        demotion_candidates=demotion_candidates,
+                        promotion_candidates=promotion_candidates,
+                    )
+
                     if result.demotion_candidates or result.promotion_candidates:
                         new_assignments, counts = (
                             self.transweave_manager.shell_transweave.apply_transitions(
@@ -1826,6 +1935,8 @@ class SequentialTrainer:
 
         task_data = self.tasks[task_id]
         eval_config = {"loss_type": "cross_entropy"}
+        if self.config.training.task_local_head:
+            eval_config["active_classes"] = list(task_data.classes)
         eval_key, self.rng_key = jax.random.split(self.rng_key)
 
         if self.training_mode == "backprop":

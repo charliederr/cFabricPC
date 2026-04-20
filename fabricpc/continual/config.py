@@ -34,6 +34,8 @@ class TrainingConfig:
 
     # Training mode: "pc" (predictive coding), "backprop", or "hybrid"
     training_mode: str = "hybrid"
+    task_local_head: bool = False
+    use_light_augmentation: bool = False
 
 
 @dataclass
@@ -69,6 +71,8 @@ class ColumnConfig:
     partitioned_task_dim: int = 64  # Output neurons per task pathway
     attention_num_heads: int = 4  # Number of attention heads if using ComposerNode
     attention_num_layers: int = 1  # Number of attention layers if using ComposerNode
+    adaptive_columns: int = 0  # Explicit adaptive non-shared pool size
+    reserve_columns: int = 0  # Explicit reserve non-shared pool size
 
 
 @dataclass
@@ -86,6 +90,8 @@ class SupportConfig:
     # Basic support selection
     topk_nonshared: int = 4
     target_nonshared_overlap: float = 0.50
+    adaptive_columns: int = 0
+    reserve_columns: int = 0
 
     # Selector policy
     selector_policy_min_examples: int = 72
@@ -168,6 +174,10 @@ class SupportConfig:
     # Similarity/redundancy
     recent_support_penalty: float = 0.10
     similarity_redundancy_scale: float = 0.65
+    reserve_bonus_scale: float = 0.10
+    reserve_min_usage: int = 0
+    exact_boundary_search_limit: int = 0
+    enable_support_diagnostics: bool = True
 
     # Hybrid selector
     hybrid_positive_margin: float = 0.003
@@ -397,6 +407,9 @@ class ShellDemotionTransWeaveConfig:
     max_demotions_per_step: int = 2  # Max neurons demoted per shell per step
     min_shell_occupancy: float = 0.25  # Minimum fraction of shell filled
     protected_center_fraction: float = 0.5  # Fraction of center never demoted
+    warmup_steps: int = 0  # Skip shell transitions until this many train steps
+    allow_inner_shell_transitions: bool = True
+    middle_shell_boundary_only: bool = False
 
 
 @dataclass
@@ -789,5 +802,96 @@ def make_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.per_weight_causal.sb_correction_strength = 0.3
         cfg.per_weight_causal.blend_mode = "soft"
         cfg.per_weight_causal.track_statistics = True
+
+    return cfg
+
+
+def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
+    """
+    Factory for the PDF-driven Split-CIFAR10 columnar protocol.
+
+    Defaults:
+    - 5 tasks of 2 classes each
+    - task-local-head semantics via class masking
+    - 40 total columns = 4 shared + 30 adaptive + 6 reserve
+    - 5 active non-shared columns
+    - shell sizes (10, 20, 30)
+    """
+    cfg = make_config(quick_smoke=quick_smoke)
+
+    cfg.num_tasks = 5
+    cfg.task_pairs = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+    cfg.num_output_classes = 10
+
+    cfg.training.task_local_head = True
+    cfg.training.use_light_augmentation = True
+    cfg.training.training_mode = "pc"
+
+    if quick_smoke:
+        cfg.training.epochs_per_task = 1
+        cfg.training.batch_size = 32
+
+        cfg.columns.shared_columns = 4
+        cfg.columns.topk_nonshared = 5
+        cfg.columns.adaptive_columns = 20
+        cfg.columns.reserve_columns = 6
+        cfg.columns.num_columns = (
+            cfg.columns.shared_columns
+            + cfg.columns.adaptive_columns
+            + cfg.columns.reserve_columns
+        )
+        cfg.columns.memory_dim = 16
+        cfg.columns.aggregator_dim = 96
+
+        cfg.shell_demotion_transweave.shell_sizes = (4, 8, 12)
+        cfg.shell_demotion_transweave.max_demotions_per_step = 1
+        cfg.shell_demotion_transweave.warmup_steps = 8
+        cfg.shell_demotion_transweave.allow_inner_shell_transitions = False
+        cfg.shell_demotion_transweave.middle_shell_boundary_only = True
+
+        cfg.support.causal_min_examples = 8
+        cfg.support.causal_target_examples = 24
+        cfg.audit.audit_batches_per_task = 1
+        cfg.audit.support_swap_audit_max_swaps = 2
+        cfg.audit.support_audit_max_batches = 1
+    else:
+        cfg.training.epochs_per_task = 3
+        cfg.training.batch_size = 256
+        cfg.training.learning_rate = 2e-4
+
+        cfg.columns.shared_columns = 4
+        cfg.columns.topk_nonshared = 5
+        cfg.columns.adaptive_columns = 30
+        cfg.columns.reserve_columns = 6
+        cfg.columns.num_columns = (
+            cfg.columns.shared_columns
+            + cfg.columns.adaptive_columns
+            + cfg.columns.reserve_columns
+        )
+        cfg.columns.memory_dim = 32
+        cfg.columns.aggregator_dim = 128
+        cfg.columns.partitioned_shared_dim = 48
+        cfg.columns.partitioned_task_dim = 80
+
+        cfg.shell_demotion_transweave.shell_sizes = (10, 20, 30)
+        cfg.shell_demotion_transweave.max_demotions_per_step = 1
+        cfg.shell_demotion_transweave.warmup_steps = 80
+        cfg.shell_demotion_transweave.allow_inner_shell_transitions = False
+        cfg.shell_demotion_transweave.middle_shell_boundary_only = True
+
+        cfg.support.causal_min_examples = 24
+        cfg.support.causal_target_examples = 90
+        cfg.audit.audit_batches_per_task = 2
+        cfg.audit.support_swap_audit_max_swaps = 12
+        cfg.audit.support_audit_max_batches = 2
+
+    cfg.support.topk_nonshared = cfg.columns.topk_nonshared
+    cfg.support.adaptive_columns = cfg.columns.adaptive_columns
+    cfg.support.reserve_columns = cfg.columns.reserve_columns
+    cfg.support.causal_max_effective_scale = 0.5
+    cfg.support.reserve_bonus_scale = 0.20
+    cfg.support.reserve_min_usage = 1
+    cfg.support.exact_boundary_search_limit = 48
+    cfg.support.enable_support_diagnostics = True
 
     return cfg

@@ -94,6 +94,7 @@ def train_step_backprop(
     optimizer: optax.GradientTransformation,
     rng_key: jax.Array,
     loss_type: str = "cross_entropy",
+    active_classes: Optional[List[int]] = None,
 ) -> Tuple[GraphParams, optax.OptState, float]:
     """
     Single backprop training step.
@@ -113,7 +114,13 @@ def train_step_backprop(
 
     def loss_fn(p):
         state = compute_forward_pass(p, structure, batch, rng_key)
-        return compute_loss(state, batch["y"], structure.task_map["y"], loss_type)
+        return compute_loss(
+            state,
+            batch["y"],
+            structure.task_map["y"],
+            loss_type,
+            active_classes=active_classes,
+        )
 
     loss, grads = jax.value_and_grad(loss_fn)(params)
     updates, opt_state = optimizer.update(grads, opt_state, params)
@@ -173,6 +180,7 @@ def train_backprop(
     # Training hyperparameters
     num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
     loss_type = config.get("loss_type", "cross_entropy")
+    active_classes = config.get("active_classes")
 
     # Support fractional epochs: e.g. 1.5 -> 2 loop iterations, last stops at 50%
     total_epochs = math.ceil(num_epochs)
@@ -181,7 +189,7 @@ def train_backprop(
     # JIT compile training step
     jit_train_step = jax.jit(
         lambda p, o, b, k: train_step_backprop(
-            p, o, b, structure, optimizer, k, loss_type
+            p, o, b, structure, optimizer, k, loss_type, active_classes
         )
     )
 
@@ -481,6 +489,7 @@ def eval_step_backprop(
     structure: GraphStructure,
     rng_key: jax.Array,
     loss_type: str = "cross_entropy",
+    active_classes: Optional[List[int]] = None,
 ) -> Tuple[float, int, int]:
     """
     Single evaluation step for backprop-trained model. No latent inference phase. Use structure configured for feedforward graph_state_initializer.
@@ -503,10 +512,23 @@ def eval_step_backprop(
     predictions = state.nodes[output_node].z_mu
     targets = batch["y"]
 
-    loss = compute_loss(state, targets, output_node, loss_type)
+    loss = compute_loss(
+        state,
+        targets,
+        output_node,
+        loss_type,
+        active_classes=active_classes,
+    )
 
     # Compute accuracy (for classification)
-    pred_labels = jnp.argmax(predictions, axis=-1)
+    if active_classes is not None and predictions.ndim >= 2:
+        class_mask = jnp.full(
+            (predictions.shape[-1],), -jnp.inf, dtype=predictions.dtype
+        )
+        class_mask = class_mask.at[jnp.array(active_classes, dtype=jnp.int32)].set(0.0)
+        pred_labels = jnp.argmax(predictions + class_mask, axis=-1)
+    else:
+        pred_labels = jnp.argmax(predictions, axis=-1)
     if targets.ndim > 1 and targets.shape[-1] > 1:
         true_labels = jnp.argmax(targets, axis=-1)
     else:
@@ -544,10 +566,13 @@ def evaluate_backprop(
     validate_feedforward_init(structure)
 
     loss_type = config.get("loss_type", "cross_entropy")
+    active_classes = config.get("active_classes")
 
     # JIT compile eval step
     jit_eval_step = jax.jit(
-        lambda p, b, k: eval_step_backprop(p, b, structure, k, loss_type)
+        lambda p, b, k: eval_step_backprop(
+            p, b, structure, k, loss_type, active_classes
+        )
     )
 
     try:

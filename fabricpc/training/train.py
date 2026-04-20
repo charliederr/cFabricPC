@@ -6,7 +6,7 @@ pmap across multiple devices. All functions work transparently on
 1 or N devices.
 """
 
-from typing import Dict, Tuple, Any, cast, List, Optional, Callable
+from typing import Dict, Tuple, Any, cast, List, Optional, Callable, Sequence
 import math
 import warnings
 import jax
@@ -104,6 +104,21 @@ def _convert_batch(batch_data) -> Dict[str, jnp.ndarray]:
         return {k: jnp.array(v) for k, v in batch_data.items()}
     else:
         raise ValueError(f"Unsupported batch format: {type(batch_data)}")
+
+
+def _mask_predictions_to_active_classes(
+    predictions: jnp.ndarray,
+    active_classes: Optional[Sequence[int]],
+) -> jnp.ndarray:
+    """Renormalize predictions over only the active task-local classes."""
+    if active_classes is None:
+        return predictions
+    num_classes = predictions.shape[-1]
+    class_mask = jnp.zeros((num_classes,), dtype=predictions.dtype)
+    class_mask = class_mask.at[jnp.array(active_classes, dtype=jnp.int32)].set(1.0)
+    masked = predictions * class_mask
+    denom = jnp.clip(jnp.sum(masked, axis=-1, keepdims=True), 1e-10, 1.0)
+    return masked / denom
 
 
 # ── gradient computation ────────────────────────────────────────────
@@ -483,6 +498,7 @@ def eval_step(
     batch: Dict[str, jnp.ndarray],
     structure: GraphStructure,
     rng_key: jax.Array,
+    active_classes: Optional[Sequence[int]] = None,
 ) -> Tuple[float, int, int]:
     """
     Single evaluation step (JIT-compilable).
@@ -532,6 +548,7 @@ def eval_step(
     if "y" in structure.task_map:
         y_node = structure.task_map["y"]
         predictions = final_state.nodes[y_node].z_mu
+        predictions = _mask_predictions_to_active_classes(predictions, active_classes)
         pred_labels = jnp.argmax(predictions, axis=1)
         true_labels = jnp.argmax(batch["y"], axis=1)
         correct = jnp.sum(pred_labels == true_labels)
@@ -565,9 +582,11 @@ def evaluate_pcn(
         Dictionary of evaluation metrics {"energy": avg_energy, "accuracy": accuracy}
     """
     from fabricpc.graph.state_initializer import initialize_graph_state
+    from fabricpc.training.train_autoregressive import compute_loss
 
     n_devices = jax.device_count()
     use_pmap = (n_devices > 1) or pmap_single_device
+    active_classes = config.get("active_classes")
 
     # Estimate number of batches
     try:
@@ -608,6 +627,7 @@ def evaluate_pcn(
         total_energy = 0.0
         total_correct = 0
         total_samples = 0
+        total_loss = 0.0
 
         for batch_idx, batch_data in enumerate(test_loader):
             batch_key_for_step = batch_keys_per_device[:, batch_idx]
@@ -651,6 +671,9 @@ def evaluate_pcn(
                 # Trim padded samples
                 predictions = predictions[:batch_size]
                 targets = batch["y"][:batch_size]
+                predictions = _mask_predictions_to_active_classes(
+                    predictions, active_classes
+                )
 
                 pred_labels = jnp.argmax(predictions, axis=1)
                 true_labels = jnp.argmax(targets, axis=1)
@@ -659,18 +682,25 @@ def evaluate_pcn(
                 total_correct += int(correct)
                 total_samples += batch_size
 
+                log_preds = jnp.log(jnp.clip(predictions, 1e-10, 1.0))
+                total_loss += float(-jnp.sum(targets * log_preds))
+
         avg_energy = total_energy / total_samples if total_samples > 0 else 0.0
         accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-        return {"energy": avg_energy, "accuracy": accuracy}
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+        return {"energy": avg_energy, "accuracy": accuracy, "loss": avg_loss}
 
     else:
         # ── JIT eval path ──
-        jit_eval_step = jax.jit(lambda p, b, k: eval_step(p, b, structure, k))
+        jit_eval_step = jax.jit(
+            lambda p, b, k: eval_step(p, b, structure, k, active_classes)
+        )
         batch_keys = jax.random.split(rng_key, num_batches)
 
         total_energy = 0.0
         total_correct = 0
         total_samples = 0
+        total_loss = 0.0
 
         for batch_idx, batch_data in enumerate(test_loader):
             batch = _convert_batch(batch_data)
@@ -683,10 +713,33 @@ def evaluate_pcn(
             total_correct += int(correct)
             total_samples += int(batch_size)
 
+            if "y" in structure.task_map:
+                y_node = structure.task_map["y"]
+                clamps = {}
+                if "x" in structure.task_map:
+                    clamps[structure.task_map["x"]] = batch["x"]
+                state = initialize_graph_state(
+                    structure,
+                    int(batch_size),
+                    batch_keys[batch_idx],
+                    clamps=clamps,
+                    params=params,
+                )
+                final_state = run_inference(params, state, clamps, structure)
+                batch_loss = compute_loss(
+                    final_state,
+                    batch["y"],
+                    y_node,
+                    loss_type="cross_entropy",
+                    active_classes=active_classes,
+                )
+                total_loss += float(batch_loss) * int(batch_size)
+
         avg_energy = total_energy / total_samples if total_samples > 0 else 0.0
         accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
 
-        return {"energy": avg_energy, "accuracy": accuracy}
+        return {"energy": avg_energy, "accuracy": accuracy, "loss": avg_loss}
 
 
 def evaluate_transformer(

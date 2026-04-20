@@ -14,7 +14,7 @@ The training loop supports both:
 - Last-token prediction (only predict final token, for efficiency)
 """
 
-from typing import Dict, Tuple, Any, List, Optional, Callable, cast
+from typing import Dict, Tuple, Any, List, Optional, Callable, Sequence, cast
 import math
 import jax
 import jax.numpy as jnp
@@ -41,6 +41,7 @@ def compute_loss(
     targets: jnp.ndarray,
     output_node: str,
     loss_type: str = "cross_entropy",
+    active_classes: Optional[Sequence[int]] = None,
 ) -> jnp.ndarray:
     """
     Compute differentiable loss
@@ -57,6 +58,16 @@ def compute_loss(
 
     # Get prediction from output node
     predictions = final_state.nodes[output_node].z_mu
+
+    if active_classes is not None and loss_type == "cross_entropy":
+        num_classes = predictions.shape[-1]
+        class_mask = jnp.zeros((num_classes,), dtype=predictions.dtype)
+        class_mask = class_mask.at[jnp.array(active_classes, dtype=jnp.int32)].set(1.0)
+        masked_predictions = predictions * class_mask
+        denom = jnp.clip(
+            jnp.sum(masked_predictions, axis=-1, keepdims=True), 1e-10, 1.0
+        )
+        predictions = masked_predictions / denom
 
     # Compute loss
     if loss_type == "cross_entropy":
