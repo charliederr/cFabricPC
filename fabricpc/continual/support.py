@@ -738,6 +738,33 @@ class SupportManager:
 
         return self.current_state
 
+    def set_support_for_task(
+        self,
+        task_id: int,
+        selected_nonshared: Sequence[int],
+    ) -> SupportState:
+        """Force a specific non-shared support to become active."""
+        selected = tuple(sorted(int(col) for col in selected_nonshared))
+        shared = tuple(range(self.num_shared))
+        all_active = shared + selected
+        self.current_state = SupportState(
+            active_nonshared=selected,
+            active_all=all_active,
+            num_columns=self.num_columns,
+            num_shared=self.num_shared,
+            topk_nonshared=self.topk_nonshared,
+            task_usage_count=self.current_state.task_usage_count,
+            column_scores=self.current_state.column_scores,
+            last_support_score_table=self.current_state.last_support_score_table,
+            causal_fingerprint_sim=self.current_state.causal_fingerprint_sim,
+            causal_confidence=self.current_state.causal_confidence,
+            causal_fingerprint_mean=self.current_state.causal_fingerprint_mean,
+            causal_effective_scale=self.current_state.causal_effective_scale,
+            causal_mix_gate=self.current_state.causal_mix_gate,
+        )
+        self.set_causal_guidance_on_state(task_id)
+        return self.current_state
+
     def get_support_diagnostics(
         self,
         task_id: int,

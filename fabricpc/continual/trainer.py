@@ -62,6 +62,13 @@ class TaskRunSummary:
     support_overlap_mean: float = 0.0
     support_entropy: float = 0.0
     reserve_fraction: float = 0.0
+    initial_support_cols: Optional[Tuple[int, ...]] = None
+    teacher_support_cols: Optional[Tuple[int, ...]] = None
+    teacher_swap_applied: bool = False
+    teacher_swap_in: Optional[int] = None
+    teacher_swap_out: Optional[int] = None
+    teacher_best_gain: float = 0.0
+    teacher_audit_rows: int = 0
 
     # Optional detailed metrics
     accuracy_per_class: Optional[Dict[int, float]] = None
@@ -119,6 +126,21 @@ class TaskRunSummary:
             "support_overlap_mean": float(self.support_overlap_mean),
             "support_entropy": float(self.support_entropy),
             "reserve_fraction": float(self.reserve_fraction),
+            "initial_support_cols": (
+                None
+                if self.initial_support_cols is None
+                else list(self.initial_support_cols)
+            ),
+            "teacher_support_cols": (
+                None
+                if self.teacher_support_cols is None
+                else list(self.teacher_support_cols)
+            ),
+            "teacher_swap_applied": bool(self.teacher_swap_applied),
+            "teacher_swap_in": self.teacher_swap_in,
+            "teacher_swap_out": self.teacher_swap_out,
+            "teacher_best_gain": float(self.teacher_best_gain),
+            "teacher_audit_rows": int(self.teacher_audit_rows),
             "epoch_accuracies": self.epoch_accuracies,
             "epoch_losses": self.epoch_losses,
             "selector_policy_used": self.selector_policy_used,
@@ -648,9 +670,11 @@ class SequentialTrainer:
             print(f"Training Task {task_id}: classes {task_data.classes}")
             print(f"{'='*50}")
 
-        # Select support columns
+        # Select support columns, then allow the exact one-swap teacher to
+        # correct the task-start support if a locally better neighbor exists.
         support_state = self.support_manager.select_support_for_task(task_id)
-        support_cols = support_state.active_all
+        teacher_info = self._apply_task_boundary_teacher(task_data, verbose=verbose)
+        support_cols = self.current_state.active_all
         self._task_supports[task_id] = support_cols
         self._set_task_context(task_id, support_cols)
         self._autotune_transition_thresholds(
@@ -885,6 +909,13 @@ class SequentialTrainer:
             support_overlap_mean=float(support_diag.get("support_overlap_mean", 0.0)),
             support_entropy=float(support_diag.get("support_entropy", 0.0)),
             reserve_fraction=float(support_diag.get("reserve_fraction", 0.0)),
+            initial_support_cols=teacher_info.get("initial_support_cols"),
+            teacher_support_cols=teacher_info.get("teacher_support_cols"),
+            teacher_swap_applied=bool(teacher_info.get("teacher_swap_applied", False)),
+            teacher_swap_in=teacher_info.get("teacher_swap_in"),
+            teacher_swap_out=teacher_info.get("teacher_swap_out"),
+            teacher_best_gain=float(teacher_info.get("teacher_best_gain", 0.0)),
+            teacher_audit_rows=int(teacher_info.get("teacher_audit_rows", 0)),
             epoch_accuracies=epoch_accuracies,
             epoch_losses=epoch_losses,
             selector_policy_used=self.support_manager.trust_controller.should_use_policy(),
@@ -955,6 +986,14 @@ class SequentialTrainer:
             print(f"  Support overlap: {summary.support_overlap_mean:.4f}")
             print(f"  Support entropy: {summary.support_entropy:.4f}")
             print(f"  Reserve frac:    {summary.reserve_fraction:.4f}")
+            if summary.initial_support_cols is not None:
+                print(f"  Initial support: {summary.initial_support_cols}")
+                print(f"  Teacher support: {summary.teacher_support_cols}")
+                print(
+                    f"  Teacher swap:    {summary.teacher_swap_applied}"
+                    f" (gain={summary.teacher_best_gain:.6f},"
+                    f" rows={summary.teacher_audit_rows})"
+                )
             if summary.causal_selector_examples > 0:
                 print(f"  Causal examples: {summary.causal_selector_examples:.0f}")
                 print(f"  Causal corr:     {summary.causal_selector_corr:.4f}")
@@ -1598,6 +1637,75 @@ class SequentialTrainer:
             print(f"  Generated {len(audit_rows)} audit rows")
 
         return audit_rows
+
+    def _apply_task_boundary_teacher(
+        self,
+        task_data: TaskData,
+        verbose: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Apply an exact one-swap teacher correction at task start.
+
+        The current support is audited against nearby one-swap alternatives using
+        the same current-plus-old local objective as the causal audit. If a
+        strictly improving swap exists, the corrected support becomes the actual
+        task-start support.
+        """
+        initial_support = tuple(self.current_state.active_all)
+        old_task_data = self.tasks[-1] if self.tasks else None
+        audit_rows = self._run_support_swap_audit(
+            current_task_data=task_data,
+            old_task_data=old_task_data,
+            verbose=verbose,
+        )
+        if not audit_rows:
+            return {
+                "initial_support_cols": initial_support,
+                "teacher_support_cols": initial_support,
+                "teacher_swap_applied": False,
+                "teacher_swap_in": None,
+                "teacher_swap_out": None,
+                "teacher_best_gain": 0.0,
+                "teacher_audit_rows": 0,
+            }
+
+        best_row = max(audit_rows, key=lambda row: float(row.get("combined_gain", 0.0)))
+        best_gain = float(best_row.get("combined_gain", 0.0))
+        best_support = tuple(
+            int(col) for col in best_row.get("alt_support", initial_support)
+        )
+        teacher_swap_applied = best_gain > 1e-8 and best_support != initial_support
+
+        if teacher_swap_applied:
+            best_nonshared = tuple(
+                col for col in best_support if col >= self.config.columns.shared_columns
+            )
+            self.support_manager.set_support_for_task(task_data.task_id, best_nonshared)
+            if verbose:
+                print(
+                    "Teacher one-swap applied:"
+                    f" out={int(best_row.get('swap_out', -1))}"
+                    f" in={int(best_row.get('swap_in', -1))}"
+                    f" gain={best_gain:.6f}"
+                )
+
+        return {
+            "initial_support_cols": initial_support,
+            "teacher_support_cols": (
+                tuple(self.current_state.active_all)
+                if teacher_swap_applied
+                else initial_support
+            ),
+            "teacher_swap_applied": teacher_swap_applied,
+            "teacher_swap_in": (
+                int(best_row.get("swap_in", -1)) if teacher_swap_applied else None
+            ),
+            "teacher_swap_out": (
+                int(best_row.get("swap_out", -1)) if teacher_swap_applied else None
+            ),
+            "teacher_best_gain": best_gain,
+            "teacher_audit_rows": len(audit_rows),
+        }
 
     def _causal_target_from_audit_row(self, row: Dict[str, Any]) -> float:
         """
