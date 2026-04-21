@@ -1049,25 +1049,49 @@ class CausalSelectorTrustController:
         n = predictor.num_examples()
         min_ex = self.config.causal_min_examples
         target_ex = max(self.config.causal_target_examples, min_ex)
+        smoothed_agreement = self.agreement_tracker.get_smoothed_agreement(window=8)
+        blended_agreement = 0.65 * recent_agreement + 0.35 * smoothed_agreement
+        bootstrap_min_ex = max(4.0, 0.5 * float(min_ex))
+        bootstrap_ready = (
+            float(n) >= bootstrap_min_ex
+            and float(recent_rows) >= bootstrap_min_ex
+            and blended_agreement >= 0.45
+        )
 
-        if n < min_ex:
+        if n < min_ex and not bootstrap_ready:
             self.last_diag = {
                 "coverage_gate": 0.0,
                 "agreement_gate": 0.0,
                 "trend_gate": 0.0,
                 "structural_gate": float(effective_internal_trust),
                 "noise_floor": 0.0,
+                "recent_agreement": float(recent_agreement),
+                "smoothed_agreement": float(smoothed_agreement),
+                "blended_agreement": float(blended_agreement),
                 "effective_scale": 0.0,
                 "mix_gate": 0.0,
             }
             self.last_effective_scale = 0.0
             return dict(self.last_diag)
 
-        # Coverage gate: ramps up from min_examples to target_examples
-        coverage_gate = max(0.0, min(1.0, (n - min_ex) / max(1.0, target_ex - min_ex)))
-
-        smoothed_agreement = self.agreement_tracker.get_smoothed_agreement(window=8)
-        blended_agreement = 0.65 * recent_agreement + 0.35 * smoothed_agreement
+        # Coverage gate:
+        # - below min_ex, allow a conservative bootstrap ramp if audits are already
+        #   informative enough;
+        # - at and above min_ex, use the normal ramp to target_ex.
+        if n < min_ex:
+            bootstrap_progress = max(
+                0.0,
+                min(
+                    1.0,
+                    (float(n) - bootstrap_min_ex)
+                    / max(1.0, float(min_ex) - bootstrap_min_ex),
+                ),
+            )
+            coverage_gate = 0.20 + 0.30 * bootstrap_progress
+        else:
+            coverage_gate = 0.50 + 0.50 * max(
+                0.0, min(1.0, (n - min_ex) / max(1.0, target_ex - min_ex))
+            )
 
         # Noise floor based on number of recent rows
         noise_floor = min(
