@@ -1566,6 +1566,12 @@ class SequentialTrainer:
             current_gain = baseline_current_loss - alt_current_loss
             old_gain = baseline_old_loss - alt_old_loss
             combined_gain = current_weight * current_gain + old_weight * old_gain
+            baseline_scale = max(
+                0.05,
+                current_weight * abs(baseline_current_loss)
+                + old_weight * abs(baseline_old_loss),
+            )
+            combined_gain_normalized = combined_gain / baseline_scale
 
             audit_rows.append(
                 {
@@ -1578,6 +1584,7 @@ class SequentialTrainer:
                     "current_gain": float(current_gain),
                     "old_gain": float(old_gain),
                     "combined_gain": float(combined_gain),
+                    "combined_gain_normalized": float(combined_gain_normalized),
                     "current_task_id": current_task_id,
                     "old_task_id": old_task_id,
                     "chosen_support": chosen_tuple,
@@ -1591,6 +1598,21 @@ class SequentialTrainer:
             print(f"  Generated {len(audit_rows)} audit rows")
 
         return audit_rows
+
+    def _causal_target_from_audit_row(self, row: Dict[str, Any]) -> float:
+        """
+        Convert an audit row into the supervised target used by the causal predictor.
+
+        The raw combined gain is normalized by baseline loss scale upstream so early
+        CIFAR audits are not numerically drowned out, then clipped and scaled into
+        the predictor's working range.
+        """
+        target = float(
+            row.get("combined_gain_normalized", row.get("combined_gain", 0.0))
+        )
+        max_abs = self.config.support.causal_max_abs_target
+        target = float(np.clip(target, -max_abs, max_abs))
+        return target * self.config.support.causal_target_scale
 
     def _add_causal_training_examples(
         self,
@@ -1638,41 +1660,56 @@ class SequentialTrainer:
         w_list = []
         meta_list = []
         chosen_sets = []
-        valid_rows = []
 
         for row in audit_rows:
             swap_in = row.get("swap_in", -1)
+            swap_out = row.get("swap_out", -1)
             if swap_in < 0 or swap_in >= num_columns:
                 continue
 
-            # Target is the combined gain (positive = swap_in is better)
-            target = row.get("combined_gain", 0.0)
-            # Clamp target
-            max_abs = self.config.support.causal_max_abs_target
-            target = float(np.clip(target, -max_abs, max_abs))
-            # Scale target
-            target = target * self.config.support.causal_target_scale
+            target = self._causal_target_from_audit_row(row)
+            signal_strength = abs(
+                float(
+                    row.get("combined_gain_normalized", row.get("combined_gain", 0.0))
+                )
+            )
+            weight = 1.0 + 4.0 * signal_strength
+            chosen_support = tuple(row.get("chosen_support", ()))
 
-            # Weight based on magnitude of current loss
-            weight = 1.0 + abs(row.get("chosen_current_loss", 0.0))
-
+            # Challenger example: candidate that would be swapped in.
             X_list.append(swap_in)
             y_list.append(target)
             w_list.append(weight)
-            chosen_sets.append(tuple(row.get("chosen_support", ())))
-            valid_rows.append(row)
+            chosen_sets.append(chosen_support)
             meta_list.append(
                 {
-                    "swap_in": swap_in,
-                    "swap_out": row.get("swap_out"),
+                    "column_idx": swap_in,
+                    "role": "challenger",
                     "task_id": current_task_id,
+                    "target": target,
                 }
             )
 
+            # Reuse example: incumbent column that would be swapped out.
+            if 0 <= swap_out < num_columns:
+                X_list.append(swap_out)
+                y_list.append(-target)
+                w_list.append(weight)
+                chosen_sets.append(tuple(c for c in chosen_support if c != swap_out))
+                meta_list.append(
+                    {
+                        "column_idx": swap_out,
+                        "role": "reuse",
+                        "task_id": current_task_id,
+                        "target": -target,
+                    }
+                )
+
         if X_list:
+            roles = [m["role"] for m in meta_list]
             X = feature_builder.build_features_batch(
                 indices=X_list,
-                roles="challenger",
+                roles=roles,
                 chosen_sets=chosen_sets,
                 base_z=base_z,
                 cert_general=cert_general,
@@ -1699,21 +1736,19 @@ class SequentialTrainer:
                 predictions = self.support_manager.causal_predictor.predict(X)
                 trust_ctrl = self.support_manager.causal_trust
                 if trust_ctrl is not None:
-                    for i, row in enumerate(valid_rows):
-                        swap_in = row.get("swap_in", -1)
-                        if swap_in >= 0:
-                            # Record prediction
+                    for i, meta in enumerate(meta_list):
+                        column_idx = int(meta.get("column_idx", -1))
+                        if column_idx >= 0:
                             trust_ctrl.record_prediction(
                                 task_id=current_task_id,
-                                column_idx=swap_in,
+                                column_idx=column_idx,
                                 predicted_score=float(predictions[i]),
-                                role="challenger",
+                                role=str(meta.get("role", "challenger")),
                             )
-                            # Record actual outcome
                             trust_ctrl.record_outcome(
                                 task_id=current_task_id,
-                                column_idx=swap_in,
-                                actual_gain=float(row.get("combined_gain", 0.0)),
+                                column_idx=column_idx,
+                                actual_gain=float(meta.get("target", 0.0)),
                             )
 
     def _register_transweave_task_end(self, task_data: TaskData) -> Dict[str, Any]:

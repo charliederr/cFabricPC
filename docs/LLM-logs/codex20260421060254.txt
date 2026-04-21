@@ -1,0 +1,318 @@
+
+• Latest full run results are in results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260420_211118.
+
+  It did not improve the experiment.
+
+  Outcome:
+
+  - average test accuracy: 0.7465
+  - average forgetting: 0.1731
+  - final accuracy matrix is still identical to the baseline:
+
+  [[0.6180 0.0000 0.0000 0.0000 0.0000]
+   [0.6970 0.7365 0.0000 0.0000 0.0000]
+   [0.5000 0.5585 0.7205 0.0000 0.0000]
+   [0.5065 0.5245 0.5315 0.8340 0.0000]
+   [0.5340 0.5000 0.5000 0.6825 0.8235]]
+
+  The specific goal of this pass also failed in full mode:
+
+  - mix_gates: [0.0, 0.0, 0.0, 0.0, 0.2585]
+  - agreement_gates: [0.0, 0.0, 0.0, 0.0, 1.0]
+
+  So despite the bootstrap change working in smoke, the full 3-epoch run still does not activate the causal selector until task 4. The gate is stronger once it activates, but it still activates too late to
+  affect retention.
+
+  Conclusion:
+
+  - the current issue is no longer just trust-controller formula shape
+  - the full-run audit/predictor signal itself is still not becoming informative early enough
+  - another gate-only patch is unlikely to help much
+
+  The next real code-level direction should be upstream of the gate:
+
+  - inspect why task-2/task-3 audit rows in full mode are yielding effectively zero usable correlation
+  - or bypass the learned causal path earlier by letting exact one-swap audit gains feed a conservative local maintenance step directly
+
+  If you want, I can trace that upstream path next and patch the audit-to-predictor pipeline rather than the gate again.
+
+
+› Please trace that upstream path next and patch the audit-to-predictor pipeline.
+
+
+• I’m tracing the audit-to-predictor path end to end now. The failure pattern says the gate is no longer the main blocker; the full-run audit signal itself is staying too weak or too degenerate before task 4,
+  so I’m inspecting how audit rows are built, filtered, and converted into causal training targets.
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "import json
+  │ from pathlib import Path
+  │ base=Path('/home/ni/repos/freeFabricPC/results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260420_211118')
+  │ … +7 lines
+  └ checkpoint_task_0.json dict_keys(['global_step', 'summaries'])
+    summaries 1
+    … +6 lines (ctrl + t to view transcript)
+    checkpoint_task_4.json dict_keys(['global_step', 'summaries'])
+    summaries 5
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "from pathlib import Path
+  │ files=[Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/trainer.py'),Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/causal.py'),Path('/home/ni/repos/freeFabricPC/cFabricPC/
+  │ fabricpc/continual/support.py')]
+  │ … +6 lines
+  └ FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/trainer.py
+    828:         audit_rows = self._run_support_swap_audit(
+    … +36 lines (ctrl + t to view transcript)
+    893:         chosen_features = self.causal_feature_builder.build_features_batch(
+    1181:     def add_causal_examples(
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve narrowed it to the right segment: the audit rows are created in _run_support_swap_audit(), then converted into supervised examples in _add_causal_training_examples(). I’m reading those two functions and
+  the predictor update path next to see whether the targets are too tiny, too symmetric, or being under-filtered in full mode.
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "from pathlib import Path
+  │ fp=Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/trainer.py')
+  │ lines=fp.read_text().splitlines()
+  │ … +4 lines
+  └ FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/trainer.py @@ 1438-1718
+    1438:     def _run_support_swap_audit(
+    … +278 lines (ctrl + t to view transcript)
+    1717:                             )
+    1718:
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "from pathlib import Path
+  │ for fp,ranges in [(Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py'),[(1170,1225)]),(Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/causal.py'),[(512,680),
+  │ (1343,1455)])]:
+  │ … +5 lines
+  └ FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py
+    @@ 1170-1225
+    … +339 lines (ctrl + t to view transcript)
+    1454:                 sims = jnp.where(chosen_valid, sims, -jnp.inf)
+    1455:                 causal_max = jnp.where(
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The likely problem is now visible: the predictor is trained on very small scaled targets from just four swaps per task, and it may not even retrain at the point those new audit examples are added. I’m tracing
+  exactly when train_if_ready() runs and whether the training labels are being damped enough to erase early signal.
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "from pathlib import Path; import re
+  │ root=Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual')
+  │ for f in root.rglob('*.py'):
+  │ … +8 lines
+  └ FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py
+    1106:             metrics = self.causal_predictor.train_if_ready()
+    … +3 lines (ctrl + t to view transcript)
+    FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/causal.py
+    581:     def train_if_ready(self) -> Dict[str, float]:
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "import json
+  │ from pathlib import Path
+  │ base=Path('/home/ni/repos/freeFabricPC/results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260420_211118')
+  │ … +4 lines
+  └ 0 4.0 0.0 0.0 0.0
+    1 8.0 0.0 0.0 0.0
+    2 12.0 0.0 0.0 0.0
+    3 16.0 0.0 0.0 0.0
+    4 20.0 0.11187428908116036 0.00013064356870081339 0.25849213105659874
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -c "from pathlib import Path
+  │ fp=Path('/home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py')
+  │ lines=fp.read_text().splitlines()
+  │ … +4 lines
+  └ FILE /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py @@ 1088-1125
+    1088:
+    … +35 lines (ctrl + t to view transcript)
+    1124:             effective_internal_trust: Trust score from support state
+    1125:             recent_agreement: Recent prediction agreement rate
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I found the main upstream issue: the predictor is being trained on tiny scaled gains from just four swap rows per task, and it only gets challenger examples. I’m patching the audit pipeline to produce a
+  stronger, better-conditioned supervision signal by normalizing gains and generating paired positive/negative examples for swap_in and swap_out, then I’ll verify that on smoke before another full run.
+
+• Edited cFabricPC/fabricpc/continual/trainer.py (+60 -25)
+    1568              combined_gain = current_weight * current_gain + old_weight * old_gain
+    1569 +            baseline_scale = max(
+    1570 +                0.05,
+    1571 +                current_weight * abs(baseline_current_loss)
+    1572 +                + old_weight * abs(baseline_old_loss),
+    1573 +            )
+    1574 +            combined_gain_normalized = combined_gain / baseline_scale
+    1575
+         ⋮
+    1586                      "combined_gain": float(combined_gain),
+    1587 +                    "combined_gain_normalized": float(combined_gain_normalized),
+    1588                      "current_task_id": current_task_id,
+         ⋮
+    1601
+    1602 +    def _causal_target_from_audit_row(self, row: Dict[str, Any]) -> float:
+    1603 +        """
+    1604 +        Convert an audit row into the supervised target used by the causal predictor.
+    1605 +
+    1606 +        The raw combined gain is normalized by baseline loss scale upstream so early
+    1607 +        CIFAR audits are not numerically drowned out, then clipped and scaled into
+    1608 +        the predictor's working range.
+    1609 +        """
+    1610 +        target = float(
+    1611 +            row.get("combined_gain_normalized", row.get("combined_gain", 0.0))
+    1612 +        )
+    1613 +        max_abs = self.config.support.causal_max_abs_target
+    1614 +        target = float(np.clip(target, -max_abs, max_abs))
+    1615 +        return target * self.config.support.causal_target_scale
+    1616 +
+    1617      def _add_causal_training_examples(
+         ⋮
+    1662          chosen_sets = []
+    1641 -        valid_rows = []
+    1663
+         ⋮
+    1665              swap_in = row.get("swap_in", -1)
+    1666 +            swap_out = row.get("swap_out", -1)
+    1667              if swap_in < 0 or swap_in >= num_columns:
+         ⋮
+    1669
+    1648 -            # Target is the combined gain (positive = swap_in is better)
+    1649 -            target = row.get("combined_gain", 0.0)
+    1650 -            # Clamp target
+    1651 -            max_abs = self.config.support.causal_max_abs_target
+    1652 -            target = float(np.clip(target, -max_abs, max_abs))
+    1653 -            # Scale target
+    1654 -            target = target * self.config.support.causal_target_scale
+    1655 -
+    1656 -            # Weight based on magnitude of current loss
+    1657 -            weight = 1.0 + abs(row.get("chosen_current_loss", 0.0))
+    1670 +            target = self._causal_target_from_audit_row(row)
+    1671 +            signal_strength = abs(
+    1672 +                float(
+    1673 +                    row.get("combined_gain_normalized", row.get("combined_gain", 0.0))
+    1674 +                )
+    1675 +            )
+    1676 +            weight = 1.0 + 4.0 * signal_strength
+    1677 +            chosen_support = tuple(row.get("chosen_support", ()))
+    1678
+    1679 +            # Challenger example: candidate that would be swapped in.
+    1680              X_list.append(swap_in)
+         ⋮
+    1682              w_list.append(weight)
+    1662 -            chosen_sets.append(tuple(row.get("chosen_support", ())))
+    1663 -            valid_rows.append(row)
+    1683 +            chosen_sets.append(chosen_support)
+    1684              meta_list.append(
+    1685                  {
+    1666 -                    "swap_in": swap_in,
+    1667 -                    "swap_out": row.get("swap_out"),
+    1686 +                    "column_idx": swap_in,
+    1687 +                    "role": "challenger",
+    1688                      "task_id": current_task_id,
+    1689 +                    "target": target,
+    1690                  }
+         ⋮
+    1692
+    1693 +            # Reuse example: incumbent column that would be swapped out.
+    1694 +            if 0 <= swap_out < num_columns:
+    1695 +                X_list.append(swap_out)
+    1696 +                y_list.append(-target)
+    1697 +                w_list.append(weight)
+    1698 +                chosen_sets.append(tuple(c for c in chosen_support if c != swap_out))
+    1699 +                meta_list.append(
+    1700 +                    {
+    1701 +                        "column_idx": swap_out,
+    1702 +                        "role": "reuse",
+    1703 +                        "task_id": current_task_id,
+    1704 +                        "target": -target,
+    1705 +                    }
+    1706 +                )
+    1707 +
+    1708          if X_list:
+    1709 +            roles = [m["role"] for m in meta_list]
+    1710              X = feature_builder.build_features_batch(
+    1711                  indices=X_list,
+    1675 -                roles="challenger",
+    1712 +                roles=roles,
+    1713                  chosen_sets=chosen_sets,
+         ⋮
+    1738                  if trust_ctrl is not None:
+    1702 -                    for i, row in enumerate(valid_rows):
+    1703 -                        swap_in = row.get("swap_in", -1)
+    1704 -                        if swap_in >= 0:
+    1705 -                            # Record prediction
+    1739 +                    for i, meta in enumerate(meta_list):
+    1740 +                        column_idx = int(meta.get("column_idx", -1))
+    1741 +                        if column_idx >= 0:
+    1742                              trust_ctrl.record_prediction(
+    1743                                  task_id=current_task_id,
+    1708 -                                column_idx=swap_in,
+    1744 +                                column_idx=column_idx,
+    1745                                  predicted_score=float(predictions[i]),
+    1710 -                                role="challenger",
+    1746 +                                role=str(meta.get("role", "challenger")),
+    1747                              )
+    1712 -                            # Record actual outcome
+    1748                              trust_ctrl.record_outcome(
+    1749                                  task_id=current_task_id,
+    1715 -                                column_idx=swap_in,
+    1716 -                                actual_gain=float(row.get("combined_gain", 0.0)),
+    1750 +                                column_idx=column_idx,
+    1751 +                                actual_gain=float(meta.get("target", 0.0)),
+    1752                              )
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The audit pipeline patch is in. It now feeds the predictor normalized gains, doubles the supervision signal with paired swap_in/swap_out examples, and makes the agreement tracker compare predictions to the
+  same transformed target the predictor was actually trained on.
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python -m py_compile /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/trainer.py /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/
+  │ causal.py /home/ni/repos/freeFabricPC/cFabricPC/fabricpc/continual/support.py
+  └ (no output)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The code compiles, and I’ve started a smoke run to test the upstream patch. The key things I’m checking now are whether the predictor correlation becomes nontrivial earlier and whether the full-style causal
+  gates activate by task 2 with a stronger underlying signal.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke
+
+• The first visible effect is already useful: task 0 now contributes 8 causal examples instead of 4, which means the paired-example patch is doing what it should. I’m waiting for task 2, since that’s where
+  early predictor training should now become possible in practice, not just in theory.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke
+
+• The upstream patch is having the intended effect immediately: the predictor is now training by task 1 in smoke, and task 2 already has a much stronger active signal than before. I’m letting the smoke run
+  finish, then I’ll decide whether to launch the full run from this patched pipeline.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke
+  └ WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+    I0000 00:00:1776764886.687918  823268 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.
+    … +250 lines (ctrl + t to view transcript)
+
+    Done!
+
+─ Worked for 9m 09s ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The smoke verification is conclusive enough to justify the real run. The upstream patch changed the behavior materially: the predictor now has 16 examples and a live mix_gate already at task 1, and 24
+  examples with mix_gate 0.3500 by task 2. I’m launching the full non-smoke CIFAR10 run on this patched pipeline now.
+
+• I traced and patched the audit-to-predictor path in cFabricPC/fabricpc/continual/trainer.py.
+
+  What changed:
+
+  - audit rows now include a normalized gain, not just the tiny raw combined loss delta
+  - the predictor now gets paired examples per swap:
+      - swap_in as a positive challenger example
+      - swap_out as a negative reuse example
+  - agreement tracking now compares predictions against the same transformed target the predictor was trained on, instead of raw unscaled gain
+
+  Smoke verification passed in results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260421_054809, and the upstream signal changed substantially:
+
+  - task 1: causal examples 16, mix_gate 0.3031
+  - task 2: causal examples 24, mix_gate 0.3500
+
+  That is the first time this pipeline has clearly activated that early.
+
+  I’ve already started the full non-smoke validation run from cFabricPC:
+
+  - session: 28049
+
+  The real question now is whether that earlier predictor activation finally changes the full 3-epoch retention result.
+ 
+  1 background terminal running · /ps to view · /stop to close
