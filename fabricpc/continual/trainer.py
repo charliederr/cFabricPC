@@ -63,11 +63,26 @@ class TaskRunSummary:
     support_entropy: float = 0.0
     reserve_fraction: float = 0.0
     initial_support_cols: Optional[Tuple[int, ...]] = None
+    selector_support_cols: Optional[Tuple[int, ...]] = None
+    causal_support_cols: Optional[Tuple[int, ...]] = None
     teacher_support_cols: Optional[Tuple[int, ...]] = None
+    causal_swap_applied: bool = False
+    causal_swap_in: Optional[int] = None
+    causal_swap_out: Optional[int] = None
+    causal_candidate_score: float = 0.0
+    causal_worst_score: float = 0.0
+    causal_margin: float = 0.0
+    causal_swap_threshold: float = 0.0
+    causal_skip_reason: str = ""
+    causal_verified: bool = False
+    causal_verified_gain: float = 0.0
+    causal_verified_gain_normalized: float = 0.0
     teacher_swap_applied: bool = False
     teacher_swap_in: Optional[int] = None
     teacher_swap_out: Optional[int] = None
     teacher_best_gain: float = 0.0
+    teacher_adjusted_gain: float = 0.0
+    teacher_total_penalty: float = 0.0
     teacher_audit_rows: int = 0
 
     # Optional detailed metrics
@@ -131,15 +146,40 @@ class TaskRunSummary:
                 if self.initial_support_cols is None
                 else list(self.initial_support_cols)
             ),
+            "selector_support_cols": (
+                None
+                if self.selector_support_cols is None
+                else list(self.selector_support_cols)
+            ),
+            "causal_support_cols": (
+                None
+                if self.causal_support_cols is None
+                else list(self.causal_support_cols)
+            ),
             "teacher_support_cols": (
                 None
                 if self.teacher_support_cols is None
                 else list(self.teacher_support_cols)
             ),
+            "causal_swap_applied": bool(self.causal_swap_applied),
+            "causal_swap_in": self.causal_swap_in,
+            "causal_swap_out": self.causal_swap_out,
+            "causal_candidate_score": float(self.causal_candidate_score),
+            "causal_worst_score": float(self.causal_worst_score),
+            "causal_margin": float(self.causal_margin),
+            "causal_swap_threshold": float(self.causal_swap_threshold),
+            "causal_skip_reason": self.causal_skip_reason,
+            "causal_verified": bool(self.causal_verified),
+            "causal_verified_gain": float(self.causal_verified_gain),
+            "causal_verified_gain_normalized": float(
+                self.causal_verified_gain_normalized
+            ),
             "teacher_swap_applied": bool(self.teacher_swap_applied),
             "teacher_swap_in": self.teacher_swap_in,
             "teacher_swap_out": self.teacher_swap_out,
             "teacher_best_gain": float(self.teacher_best_gain),
+            "teacher_adjusted_gain": float(self.teacher_adjusted_gain),
+            "teacher_total_penalty": float(self.teacher_total_penalty),
             "teacher_audit_rows": int(self.teacher_audit_rows),
             "epoch_accuracies": self.epoch_accuracies,
             "epoch_losses": self.epoch_losses,
@@ -670,9 +710,16 @@ class SequentialTrainer:
             print(f"Training Task {task_id}: classes {task_data.classes}")
             print(f"{'='*50}")
 
-        # Select support columns, then allow the exact one-swap teacher to
+        # Select support columns, verify any causal proposal against a cheap
+        # exact local objective, then allow the exact one-swap teacher to
         # correct the task-start support if a locally better neighbor exists.
         support_state = self.support_manager.select_support_for_task(task_id)
+        causal_info = dict(self.support_manager.last_causal_decision)
+        causal_info = self._verify_causal_boundary_proposal(
+            task_data=task_data,
+            causal_info=causal_info,
+            verbose=verbose,
+        )
         teacher_info = self._apply_task_boundary_teacher(task_data, verbose=verbose)
         support_cols = self.current_state.active_all
         self._task_supports[task_id] = support_cols
@@ -910,11 +957,36 @@ class SequentialTrainer:
             support_entropy=float(support_diag.get("support_entropy", 0.0)),
             reserve_fraction=float(support_diag.get("reserve_fraction", 0.0)),
             initial_support_cols=teacher_info.get("initial_support_cols"),
+            selector_support_cols=(
+                tuple(range(self.config.columns.shared_columns))
+                + tuple(causal_info.get("selector_nonshared", ()))
+            ),
+            causal_support_cols=(
+                tuple(range(self.config.columns.shared_columns))
+                + tuple(causal_info.get("causal_nonshared", ()))
+            ),
             teacher_support_cols=teacher_info.get("teacher_support_cols"),
+            causal_swap_applied=bool(causal_info.get("causal_swap_applied", False)),
+            causal_swap_in=causal_info.get("causal_swap_in"),
+            causal_swap_out=causal_info.get("causal_swap_out"),
+            causal_candidate_score=float(
+                causal_info.get("causal_candidate_score", 0.0)
+            ),
+            causal_worst_score=float(causal_info.get("causal_worst_score", 0.0)),
+            causal_margin=float(causal_info.get("causal_margin", 0.0)),
+            causal_swap_threshold=float(causal_info.get("causal_swap_threshold", 0.0)),
+            causal_skip_reason=str(causal_info.get("causal_skip_reason", "")),
+            causal_verified=bool(causal_info.get("causal_verified", False)),
+            causal_verified_gain=float(causal_info.get("causal_verified_gain", 0.0)),
+            causal_verified_gain_normalized=float(
+                causal_info.get("causal_verified_gain_normalized", 0.0)
+            ),
             teacher_swap_applied=bool(teacher_info.get("teacher_swap_applied", False)),
             teacher_swap_in=teacher_info.get("teacher_swap_in"),
             teacher_swap_out=teacher_info.get("teacher_swap_out"),
             teacher_best_gain=float(teacher_info.get("teacher_best_gain", 0.0)),
+            teacher_adjusted_gain=float(teacher_info.get("teacher_adjusted_gain", 0.0)),
+            teacher_total_penalty=float(teacher_info.get("teacher_total_penalty", 0.0)),
             teacher_audit_rows=int(teacher_info.get("teacher_audit_rows", 0)),
             epoch_accuracies=epoch_accuracies,
             epoch_losses=epoch_losses,
@@ -988,10 +1060,21 @@ class SequentialTrainer:
             print(f"  Reserve frac:    {summary.reserve_fraction:.4f}")
             if summary.initial_support_cols is not None:
                 print(f"  Initial support: {summary.initial_support_cols}")
-                print(f"  Teacher support: {summary.teacher_support_cols}")
+                print(f"  Selector support: {summary.selector_support_cols}")
+                print(f"  Causal support:   {summary.causal_support_cols}")
+                print(f"  Teacher support:  {summary.teacher_support_cols}")
+                print(
+                    f"  Causal swap:      {summary.causal_swap_applied}"
+                    f" (in={summary.causal_swap_in}, out={summary.causal_swap_out},"
+                    f" margin={summary.causal_margin:.6f},"
+                    f" threshold={summary.causal_swap_threshold:.6f},"
+                    f" reason={summary.causal_skip_reason})"
+                )
                 print(
                     f"  Teacher swap:    {summary.teacher_swap_applied}"
                     f" (gain={summary.teacher_best_gain:.6f},"
+                    f" adjusted={summary.teacher_adjusted_gain:.6f},"
+                    f" penalty={summary.teacher_total_penalty:.6f},"
                     f" rows={summary.teacher_audit_rows})"
                 )
             if summary.causal_selector_examples > 0:
@@ -1666,15 +1749,35 @@ class SequentialTrainer:
                 "teacher_swap_in": None,
                 "teacher_swap_out": None,
                 "teacher_best_gain": 0.0,
+                "teacher_adjusted_gain": 0.0,
+                "teacher_total_penalty": 0.0,
                 "teacher_audit_rows": 0,
             }
 
-        best_row = max(audit_rows, key=lambda row: float(row.get("combined_gain", 0.0)))
+        scored_rows = self._score_boundary_teacher_rows(
+            audit_rows=audit_rows,
+            initial_support=initial_support,
+        )
+        best_row = max(
+            scored_rows,
+            key=lambda row: float(
+                row.get("teacher_adjusted_gain", row.get("combined_gain", 0.0))
+            ),
+        )
         best_gain = float(best_row.get("combined_gain", 0.0))
+        best_gain_normalized = float(best_row.get("combined_gain_normalized", 0.0))
+        adjusted_gain = float(best_row.get("teacher_adjusted_gain", best_gain))
+        total_penalty = float(best_row.get("teacher_total_penalty", 0.0))
         best_support = tuple(
             int(col) for col in best_row.get("alt_support", initial_support)
         )
-        teacher_swap_applied = best_gain > 1e-8 and best_support != initial_support
+        teacher_swap_applied = (
+            best_support != initial_support
+            and best_gain >= float(self.config.support.teacher_boundary_min_gain)
+            and best_gain_normalized
+            >= float(self.config.support.teacher_boundary_min_normalized_gain)
+            and adjusted_gain > 0.0
+        )
 
         if teacher_swap_applied:
             best_nonshared = tuple(
@@ -1687,7 +1790,19 @@ class SequentialTrainer:
                     f" out={int(best_row.get('swap_out', -1))}"
                     f" in={int(best_row.get('swap_in', -1))}"
                     f" gain={best_gain:.6f}"
+                    f" adjusted={adjusted_gain:.6f}"
+                    f" penalty={total_penalty:.6f}"
                 )
+        elif verbose:
+            print(
+                "Teacher one-swap rejected:"
+                f" out={int(best_row.get('swap_out', -1))}"
+                f" in={int(best_row.get('swap_in', -1))}"
+                f" gain={best_gain:.6f}"
+                f" normalized={best_gain_normalized:.6f}"
+                f" adjusted={adjusted_gain:.6f}"
+                f" penalty={total_penalty:.6f}"
+            )
 
         return {
             "initial_support_cols": initial_support,
@@ -1704,8 +1819,237 @@ class SequentialTrainer:
                 int(best_row.get("swap_out", -1)) if teacher_swap_applied else None
             ),
             "teacher_best_gain": best_gain,
+            "teacher_adjusted_gain": adjusted_gain,
+            "teacher_total_penalty": total_penalty,
             "teacher_audit_rows": len(audit_rows),
         }
+
+    def _verify_causal_boundary_proposal(
+        self,
+        task_data: TaskData,
+        causal_info: Dict[str, Any],
+        verbose: bool = False,
+    ) -> Dict[str, Any]:
+        """Verify a causal support proposal with a cheap exact local audit."""
+        selector_nonshared = tuple(
+            int(col) for col in causal_info.get("selector_nonshared", ())
+        )
+        causal_nonshared = tuple(
+            int(col) for col in causal_info.get("causal_nonshared", ())
+        )
+        if (
+            not causal_info.get("causal_swap_applied", False)
+            or not selector_nonshared
+            or not causal_nonshared
+            or selector_nonshared == causal_nonshared
+        ):
+            causal_info["causal_verified"] = False
+            causal_info["causal_verified_gain"] = 0.0
+            causal_info["causal_verified_gain_normalized"] = 0.0
+            return causal_info
+
+        current_task_id = task_data.task_id
+        old_task_data = self.tasks[-1] if self.tasks else None
+        max_batches = self.config.audit.support_audit_max_batches
+        current_batches = self._collect_batches(task_data.test_loader, max_batches)
+        old_batches = (
+            self._collect_batches(old_task_data.test_loader, max_batches)
+            if old_task_data is not None
+            else []
+        )
+        selector_support = (
+            tuple(range(self.config.columns.shared_columns)) + selector_nonshared
+        )
+        causal_support = (
+            tuple(range(self.config.columns.shared_columns)) + causal_nonshared
+        )
+
+        selector_current_loss = self._evaluate_loss_on_batches(
+            current_batches,
+            current_task_id,
+            selector_support,
+            active_classes=task_data.classes,
+        )
+        selector_old_loss = (
+            self._evaluate_loss_on_batches(
+                old_batches,
+                current_task_id,
+                selector_support,
+                active_classes=(
+                    old_task_data.classes if old_task_data is not None else None
+                ),
+            )
+            if old_batches
+            else 0.0
+        )
+        causal_current_loss = self._evaluate_loss_on_batches(
+            current_batches,
+            current_task_id,
+            causal_support,
+            active_classes=task_data.classes,
+        )
+        causal_old_loss = (
+            self._evaluate_loss_on_batches(
+                old_batches,
+                current_task_id,
+                causal_support,
+                active_classes=(
+                    old_task_data.classes if old_task_data is not None else None
+                ),
+            )
+            if old_batches
+            else 0.0
+        )
+
+        current_weight = self.config.audit.support_audit_current_weight
+        old_weight = self.config.audit.support_audit_old_weight
+        verified_gain = current_weight * (
+            selector_current_loss - causal_current_loss
+        ) + old_weight * (selector_old_loss - causal_old_loss)
+        baseline_scale = max(
+            0.05,
+            current_weight * abs(selector_current_loss)
+            + old_weight * abs(selector_old_loss),
+        )
+        verified_gain_normalized = verified_gain / baseline_scale
+        causal_verified = verified_gain >= 0.0
+
+        causal_info["causal_verified"] = bool(causal_verified)
+        causal_info["causal_verified_gain"] = float(verified_gain)
+        causal_info["causal_verified_gain_normalized"] = float(verified_gain_normalized)
+
+        if not causal_verified:
+            self.support_manager.set_support_for_task(
+                current_task_id, selector_nonshared
+            )
+            self.current_state = self.support_manager.current_state
+            causal_info["causal_nonshared"] = selector_nonshared
+            causal_info["causal_swap_applied"] = False
+            causal_info["causal_swap_in"] = None
+            causal_info["causal_swap_out"] = None
+            causal_info["causal_skip_reason"] = "verification_rejected"
+            if verbose:
+                print(
+                    "Causal proposal rejected by exact audit:"
+                    f" gain={verified_gain:.6f}"
+                    f" normalized={verified_gain_normalized:.6f}"
+                )
+        elif verbose:
+            print(
+                "Causal proposal verified by exact audit:"
+                f" gain={verified_gain:.6f}"
+                f" normalized={verified_gain_normalized:.6f}"
+            )
+
+        return causal_info
+
+    def _score_boundary_teacher_rows(
+        self,
+        audit_rows: List[Dict[str, Any]],
+        initial_support: Tuple[int, ...],
+    ) -> List[Dict[str, Any]]:
+        """Apply conservative penalties to task-boundary teacher swap candidates."""
+        if not audit_rows:
+            return []
+
+        support_cfg = self.config.support
+        baseline_overlap = self._mean_teacher_history_overlap(initial_support)
+        usage_counts = self._teacher_column_usage_counts()
+        recent_usage_counts = self._teacher_column_usage_counts(
+            recent_task_window=int(support_cfg.teacher_boundary_recent_task_window)
+        )
+
+        scored_rows: List[Dict[str, Any]] = []
+        for row in audit_rows:
+            alt_support = tuple(int(col) for col in row.get("alt_support", ()))
+            alt_overlap = self._mean_teacher_history_overlap(alt_support)
+            overlap_drop = max(0.0, baseline_overlap - alt_overlap)
+            overlap_penalty = (
+                float(support_cfg.teacher_boundary_overlap_penalty) * overlap_drop
+            )
+
+            swap_in = int(row.get("swap_in", -1))
+            swap_out = int(row.get("swap_out", -1))
+            reuse_gap = max(
+                0.0,
+                float(usage_counts.get(swap_in, 0.0))
+                - float(usage_counts.get(swap_out, 0.0)),
+            )
+            recent_reuse_gap = max(
+                0.0,
+                float(recent_usage_counts.get(swap_in, 0.0))
+                - float(recent_usage_counts.get(swap_out, 0.0)),
+            )
+            reuse_penalty = (
+                float(support_cfg.teacher_boundary_reuse_penalty) * reuse_gap
+            )
+            recent_reuse_penalty = (
+                float(support_cfg.teacher_boundary_recent_reuse_penalty)
+                * recent_reuse_gap
+            )
+            swap_penalty = float(support_cfg.teacher_boundary_swap_penalty)
+            total_penalty = (
+                swap_penalty + overlap_penalty + reuse_penalty + recent_reuse_penalty
+            )
+            adjusted_gain = float(row.get("combined_gain", 0.0)) - total_penalty
+
+            row_scored = dict(row)
+            row_scored["teacher_history_overlap"] = float(alt_overlap)
+            row_scored["teacher_overlap_penalty"] = float(overlap_penalty)
+            row_scored["teacher_reuse_penalty"] = float(reuse_penalty)
+            row_scored["teacher_recent_reuse_penalty"] = float(recent_reuse_penalty)
+            row_scored["teacher_swap_penalty"] = float(swap_penalty)
+            row_scored["teacher_total_penalty"] = float(total_penalty)
+            row_scored["teacher_adjusted_gain"] = float(adjusted_gain)
+            scored_rows.append(row_scored)
+        return scored_rows
+
+    def _teacher_column_usage_counts(
+        self,
+        recent_task_window: Optional[int] = None,
+    ) -> Dict[int, float]:
+        """Count historical support usage for non-shared columns."""
+        rows = self.support_manager.support_bank.rows
+        if recent_task_window is not None and recent_task_window > 0:
+            min_task_id = max(0, len(self.tasks) - recent_task_window)
+            rows = [row for row in rows if int(row.task_id) >= min_task_id]
+
+        usage_counts: Dict[int, float] = {}
+        for row in rows:
+            for col in row.support_cols:
+                col = int(col)
+                if col < self.config.columns.shared_columns:
+                    continue
+                usage_counts[col] = usage_counts.get(col, 0.0) + 1.0
+        return usage_counts
+
+    def _mean_teacher_history_overlap(
+        self,
+        support_cols: Tuple[int, ...],
+    ) -> float:
+        """Compute mean historical Jaccard overlap for the non-shared support."""
+        nonshared = {
+            int(col)
+            for col in support_cols
+            if int(col) >= self.config.columns.shared_columns
+        }
+        if not nonshared:
+            return 0.0
+
+        overlaps: List[float] = []
+        for row in self.support_manager.support_bank.rows:
+            row_nonshared = {
+                int(col)
+                for col in row.support_cols
+                if int(col) >= self.config.columns.shared_columns
+            }
+            if not row_nonshared:
+                continue
+            union_size = len(nonshared | row_nonshared)
+            if union_size <= 0:
+                continue
+            overlaps.append(len(nonshared & row_nonshared) / union_size)
+        return float(np.mean(overlaps)) if overlaps else 0.0
 
     def _causal_target_from_audit_row(self, row: Dict[str, Any]) -> float:
         """

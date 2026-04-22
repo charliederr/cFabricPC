@@ -10,6 +10,7 @@ Implements the PDF-driven first serious CIFAR protocol:
 """
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ set_jax_flags_before_importing_jax(jax_platforms="cuda")
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 from fabricpc.nodes import Linear, IdentityNode
@@ -312,6 +314,18 @@ def main():
         "--shared-columns", type=int, default=None, help="Override shared columns"
     )
     parser.add_argument(
+        "--adaptive-columns",
+        type=int,
+        default=None,
+        help="Override adaptive nonshared columns",
+    )
+    parser.add_argument(
+        "--reserve-columns",
+        type=int,
+        default=None,
+        help="Override reserve nonshared columns",
+    )
+    parser.add_argument(
         "--topk-nonshared",
         type=int,
         default=None,
@@ -322,6 +336,11 @@ def main():
     )
     parser.add_argument(
         "--causal-scale", type=float, default=None, help="Override causal scale"
+    )
+    parser.add_argument(
+        "--causal-force-top-swap",
+        action="store_true",
+        help="Force one top-ranked causal swap once the predictor is trained",
     )
     parser.add_argument(
         "--ewc", action="store_true", help="Enable EWC retention regularization"
@@ -353,20 +372,34 @@ def main():
         config.columns.num_columns = args.num_columns
     if args.shared_columns is not None:
         config.columns.shared_columns = args.shared_columns
+    if args.adaptive_columns is not None:
+        config.columns.adaptive_columns = args.adaptive_columns
+    if args.reserve_columns is not None:
+        config.columns.reserve_columns = args.reserve_columns
     if args.topk_nonshared is not None:
         config.columns.topk_nonshared = args.topk_nonshared
         config.support.topk_nonshared = args.topk_nonshared
-    if args.num_columns is not None or args.shared_columns is not None:
+    if args.adaptive_columns is not None or args.reserve_columns is not None:
+        config.columns.num_columns = (
+            config.columns.shared_columns
+            + config.columns.adaptive_columns
+            + config.columns.reserve_columns
+        )
+    elif args.num_columns is not None or args.shared_columns is not None:
         config.columns.adaptive_columns = max(
             config.columns.num_columns
             - config.columns.shared_columns
             - config.columns.reserve_columns,
             0,
         )
+    config.support.adaptive_columns = config.columns.adaptive_columns
+    config.support.reserve_columns = config.columns.reserve_columns
     if args.memory_dim is not None:
         config.columns.memory_dim = args.memory_dim
     if args.causal_scale is not None:
         config.support.causal_max_effective_scale = args.causal_scale
+    if args.causal_force_top_swap:
+        config.support.causal_force_top_swap = True
     if args.ewc:
         config.ewc.enable = True
     if args.ewc_lambda is not None:
@@ -458,10 +491,36 @@ def main():
     accuracy_matrix = trainer.accuracy_matrix()
     print("\nAccuracy Matrix:")
     print(accuracy_matrix)
-    print(f"\nAverage forgetting: {trainer.get_forgetting_metric():.4f}")
+    avg_forgetting = trainer.get_forgetting_metric()
+    final_row = accuracy_matrix[-1] if accuracy_matrix.size else np.array([])
+    final_row_mean = (
+        float(np.mean(final_row[final_row > 0]))
+        if final_row.size and np.any(final_row > 0)
+        else 0.0
+    )
+    task0_final = float(final_row[0]) if final_row.size >= 1 else 0.0
+    task1_final = float(final_row[1]) if final_row.size >= 2 else 0.0
+    print(f"\nAverage forgetting: {avg_forgetting:.4f}")
+    print("Retention-first summary:")
+    print(f"  Task-0 final accuracy: {task0_final:.4f}")
+    print(f"  Task-1 final accuracy: {task1_final:.4f}")
+    print(f"  Final-row mean:        {final_row_mean:.4f}")
 
     save_summaries_json(summaries, run_dir / "summaries.json")
     save_accuracy_matrix(accuracy_matrix, run_dir / "accuracy_matrix.csv")
+    retention_summary = {
+        "task0_final_accuracy": task0_final,
+        "task1_final_accuracy": task1_final,
+        "final_row_mean": final_row_mean,
+        "average_forgetting": float(avg_forgetting),
+        "average_test_accuracy": float(
+            np.mean([summary.test_accuracy for summary in summaries])
+            if summaries
+            else 0.0
+        ),
+    }
+    with open(run_dir / "retention_summary.json", "w", encoding="utf-8") as f:
+        json.dump(retention_summary, f, indent=2)
 
     try:
         print("\nGenerating plots...")

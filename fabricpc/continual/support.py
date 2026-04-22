@@ -634,6 +634,18 @@ class SupportManager:
             num_tasks=num_tasks,
             topk_nonshared=topk_nonshared,
         )
+        self.last_causal_decision: Dict[str, Any] = {
+            "selector_nonshared": tuple(self.current_state.active_nonshared),
+            "causal_nonshared": tuple(self.current_state.active_nonshared),
+            "causal_swap_applied": False,
+            "causal_swap_in": None,
+            "causal_swap_out": None,
+            "causal_candidate_score": 0.0,
+            "causal_worst_score": 0.0,
+            "causal_margin": 0.0,
+            "causal_swap_threshold": 0.0,
+            "causal_skip_reason": "init",
+        }
 
     def select_support_for_task(
         self,
@@ -710,9 +722,30 @@ class SupportManager:
                     + reserve_candidates[:needed]
                 )[:columns_per_task]
 
+        selector_selected = tuple(int(col) for col in selected)
+
         # Apply causal guidance if available and configured
         if self.config is not None and self.config.causal_max_effective_scale > 0:
-            selected = self._apply_causal_guidance(task_id, list(selected))
+            selected, causal_decision = self._apply_causal_guidance(
+                task_id, list(selector_selected)
+            )
+            causal_decision["selector_nonshared"] = selector_selected
+            causal_decision["causal_nonshared"] = tuple(int(col) for col in selected)
+            self.last_causal_decision = causal_decision
+        else:
+            selected = selector_selected
+            self.last_causal_decision = {
+                "selector_nonshared": selector_selected,
+                "causal_nonshared": selector_selected,
+                "causal_swap_applied": False,
+                "causal_swap_in": None,
+                "causal_swap_out": None,
+                "causal_candidate_score": 0.0,
+                "causal_worst_score": 0.0,
+                "causal_margin": 0.0,
+                "causal_swap_threshold": 0.0,
+                "causal_skip_reason": "disabled",
+            }
 
         # Update state
         shared = tuple(range(self.num_shared))
@@ -816,7 +849,7 @@ class SupportManager:
         self,
         task_id: int,
         initial_selected: List[int],
-    ) -> Tuple[int, ...]:
+    ) -> Tuple[Tuple[int, ...], Dict[str, Any]]:
         """
         Apply causal guidance to refine column selection.
 
@@ -830,11 +863,23 @@ class SupportManager:
         Returns:
             Refined selection as tuple
         """
+        default_decision = {
+            "causal_swap_applied": False,
+            "causal_swap_in": None,
+            "causal_swap_out": None,
+            "causal_candidate_score": 0.0,
+            "causal_worst_score": 0.0,
+            "causal_margin": 0.0,
+            "causal_swap_threshold": 0.0,
+            "causal_skip_reason": "unavailable",
+        }
         if self.causal_predictor is None or not self.causal_predictor.trained:
-            return tuple(initial_selected)
+            default_decision["causal_skip_reason"] = "predictor_untrained"
+            return tuple(initial_selected), default_decision
 
         if self.causal_trust is None:
-            return tuple(initial_selected)
+            default_decision["causal_skip_reason"] = "no_trust_controller"
+            return tuple(initial_selected), default_decision
 
         # Get current trust state
         diag = self.causal_trust.last_diag
@@ -843,7 +888,9 @@ class SupportManager:
 
         # If trusted causal influence is too low, skip causal guidance.
         if mix_gate < 0.02 or effective_scale <= 1e-8:
-            return tuple(initial_selected)
+            default_decision["causal_swap_threshold"] = 0.01 * max(0.1, 1.0 - mix_gate)
+            default_decision["causal_skip_reason"] = "gate_too_low"
+            return tuple(initial_selected), default_decision
 
         # Get fingerprint data for feature building
         fp_mean = None
@@ -859,7 +906,8 @@ class SupportManager:
         unchosen = [c for c in all_nonshared if c not in initial_selected]
 
         if not unchosen:
-            return tuple(initial_selected)
+            default_decision["causal_skip_reason"] = "no_candidates"
+            return tuple(initial_selected), default_decision
 
         # Simple similarity functions
         def struct_sim(i: int, j: int) -> float:
@@ -912,10 +960,7 @@ class SupportManager:
         )
         candidate_order = np.argsort(candidate_pred)[::-1]
 
-        # Consider swapping in top candidates if they score well.
         selected = list(initial_selected)
-        swap_threshold = 0.01 * max(0.1, 1.0 - mix_gate)
-
         chosen_contexts = [tuple(c for c in selected if c != col) for col in selected]
         chosen_features = self.causal_feature_builder.build_features_batch(
             indices=selected,
@@ -938,16 +983,81 @@ class SupportManager:
         worst_idx = int(np.argmin(chosen_pred))
         worst_score = float(chosen_pred[worst_idx])
 
-        for order_idx in candidate_order[:2]:  # Consider top 2 candidates
-            cand_col = unchosen[int(order_idx)]
-            cand_score = float(candidate_pred[int(order_idx)])
-            if cand_score > swap_threshold:
-                # Swap if candidate is significantly better
-                if cand_score - worst_score > swap_threshold:
-                    selected[worst_idx] = cand_col
-                    break  # Only one swap per selection
+        # Consider swaps among a small shortlist of challengers and weak reuse columns.
+        swap_threshold = 0.01 * max(0.1, 1.0 - mix_gate)
+        score_floor = 0.5 * swap_threshold
+        margin_threshold = min(swap_threshold, 0.05 * max(abs(worst_score), 1.0))
+        challenger_topk = max(
+            1,
+            int(
+                getattr(self.config, "causal_challenger_topk", 3) if self.config else 3
+            ),
+        )
+        reuse_bottomk = max(
+            1,
+            int(getattr(self.config, "causal_reuse_bottomk", 3) if self.config else 3),
+        )
+        challenger_indices = candidate_order[: min(challenger_topk, len(unchosen))]
+        chosen_order = np.argsort(chosen_pred)
+        reuse_indices = chosen_order[: min(reuse_bottomk, len(selected))]
 
-        return tuple(selected)
+        best_candidate_score = float(candidate_pred[int(candidate_order[0])])
+        swap_out = int(selected[worst_idx])
+
+        swap_applied = False
+        swap_in = None
+        margin = 0.0
+        force_top_swap = bool(
+            getattr(self.config, "causal_force_top_swap", False)
+            if self.config
+            else False
+        )
+        best_pair: Optional[Tuple[int, int, float, float]] = None
+        for cand_idx in challenger_indices:
+            cand_col = int(unchosen[int(cand_idx)])
+            cand_score = float(candidate_pred[int(cand_idx)])
+            for reuse_idx in reuse_indices:
+                reuse_idx = int(reuse_idx)
+                reuse_col = int(selected[reuse_idx])
+                reuse_score = float(chosen_pred[reuse_idx])
+                cand_margin = float(cand_score - reuse_score)
+                if best_pair is None or cand_margin > best_pair[2]:
+                    best_pair = (cand_col, reuse_col, cand_margin, cand_score)
+
+        if best_pair is not None:
+            cand_col, reuse_col, cand_margin, cand_score = best_pair
+            if force_top_swap:
+                replace_idx = selected.index(reuse_col)
+                selected[replace_idx] = cand_col
+                swap_applied = True
+                swap_in = cand_col
+                swap_out = reuse_col
+                margin = cand_margin
+                best_candidate_score = cand_score
+            elif cand_score > score_floor and cand_margin > margin_threshold:
+                replace_idx = selected.index(reuse_col)
+                selected[replace_idx] = cand_col
+                swap_applied = True
+                swap_in = cand_col
+                swap_out = reuse_col
+                margin = cand_margin
+                best_candidate_score = cand_score
+
+        decision = {
+            "causal_swap_applied": swap_applied,
+            "causal_swap_in": swap_in,
+            "causal_swap_out": swap_out if swap_applied else None,
+            "causal_candidate_score": best_candidate_score,
+            "causal_worst_score": worst_score,
+            "causal_margin": margin,
+            "causal_swap_threshold": margin_threshold,
+            "causal_skip_reason": (
+                "forced_top_swap"
+                if swap_applied and force_top_swap
+                else "applied" if swap_applied else "margin_too_small"
+            ),
+        }
+        return tuple(selected), decision
 
     def record_outcome(
         self,

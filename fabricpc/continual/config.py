@@ -107,6 +107,13 @@ class SupportConfig:
     teacher_target_examples: int = 36
     selector_teacher_step: float = 0.18
     selector_teacher_override_margin: float = 0.015
+    teacher_boundary_min_gain: float = 0.0
+    teacher_boundary_min_normalized_gain: float = 0.0
+    teacher_boundary_swap_penalty: float = 0.0
+    teacher_boundary_overlap_penalty: float = 0.0
+    teacher_boundary_reuse_penalty: float = 0.0
+    teacher_boundary_recent_reuse_penalty: float = 0.0
+    teacher_boundary_recent_task_window: int = 2
 
     # Replay bank
     replay_bank_support_enable: bool = True
@@ -140,6 +147,9 @@ class SupportConfig:
     causal_max_abs_target: float = 0.75
     causal_target_scale: float = 0.10
     causal_feature_dim: int = 21
+    causal_force_top_swap: bool = False
+    causal_challenger_topk: int = 3
+    causal_reuse_bottomk: int = 3
 
     # Causal Trust Controller
     causal_agreement_target: float = 0.35
@@ -852,6 +862,13 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.support.causal_min_examples = 8
         cfg.support.causal_target_examples = 24
         cfg.support.causal_agreement_target = 0.25
+        cfg.support.teacher_boundary_min_gain = 0.015
+        cfg.support.teacher_boundary_min_normalized_gain = 0.020
+        cfg.support.teacher_boundary_swap_penalty = 0.004
+        cfg.support.teacher_boundary_overlap_penalty = 0.020
+        cfg.support.teacher_boundary_reuse_penalty = 0.004
+        cfg.support.teacher_boundary_recent_reuse_penalty = 0.006
+        cfg.support.teacher_boundary_recent_task_window = 2
         cfg.audit.audit_batches_per_task = 2
         cfg.audit.support_swap_audit_max_swaps = 4
         cfg.audit.support_audit_max_batches = 1
@@ -883,6 +900,13 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.support.causal_min_examples = 16
         cfg.support.causal_target_examples = 60
         cfg.support.causal_agreement_target = 0.25
+        cfg.support.teacher_boundary_min_gain = 0.020
+        cfg.support.teacher_boundary_min_normalized_gain = 0.030
+        cfg.support.teacher_boundary_swap_penalty = 0.005
+        cfg.support.teacher_boundary_overlap_penalty = 0.025
+        cfg.support.teacher_boundary_reuse_penalty = 0.005
+        cfg.support.teacher_boundary_recent_reuse_penalty = 0.010
+        cfg.support.teacher_boundary_recent_task_window = 2
         cfg.audit.audit_batches_per_task = 2
         cfg.audit.support_swap_audit_enable = True
         cfg.audit.support_swap_audit_max_swaps = 4
