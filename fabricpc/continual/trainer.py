@@ -123,6 +123,10 @@ class TaskRunSummary:
     transweave_composer_cost: float = 0.0
     transweave_shell_demotions: int = 0
     transweave_shell_promotions: int = 0
+    transweave_promoted_columns: Tuple[int, ...] = field(default_factory=tuple)
+    transweave_early_promoted_columns: Tuple[int, ...] = field(default_factory=tuple)
+    transweave_task0_promoted_columns: Tuple[int, ...] = field(default_factory=tuple)
+    transweave_task1_promoted_columns: Tuple[int, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -216,6 +220,16 @@ class TaskRunSummary:
             "transweave_composer_cost": float(self.transweave_composer_cost),
             "transweave_shell_demotions": self.transweave_shell_demotions,
             "transweave_shell_promotions": self.transweave_shell_promotions,
+            "transweave_promoted_columns": list(self.transweave_promoted_columns),
+            "transweave_early_promoted_columns": list(
+                self.transweave_early_promoted_columns
+            ),
+            "transweave_task0_promoted_columns": list(
+                self.transweave_task0_promoted_columns
+            ),
+            "transweave_task1_promoted_columns": list(
+                self.transweave_task1_promoted_columns
+            ),
         }
 
 
@@ -1023,6 +1037,18 @@ class SequentialTrainer:
             transweave_composer_cost=float(transweave_stats.get("composer_cost", 0.0)),
             transweave_shell_demotions=transweave_stats.get("shell_demotions", 0),
             transweave_shell_promotions=transweave_stats.get("shell_promotions", 0),
+            transweave_promoted_columns=tuple(
+                int(col) for col in transweave_stats.get("promoted_columns", ())
+            ),
+            transweave_early_promoted_columns=tuple(
+                int(col) for col in transweave_stats.get("early_promoted_columns", ())
+            ),
+            transweave_task0_promoted_columns=tuple(
+                int(col) for col in transweave_stats.get("task0_promoted_columns", ())
+            ),
+            transweave_task1_promoted_columns=tuple(
+                int(col) for col in transweave_stats.get("task1_promoted_columns", ())
+            ),
         )
 
         # Record outcome in support manager
@@ -1113,6 +1139,15 @@ class SequentialTrainer:
                     print(
                         f"    Shell promotions:    {summary.transweave_shell_promotions}"
                     )
+                    if summary.transweave_promoted_columns:
+                        print(
+                            f"    Promoted columns:    {summary.transweave_promoted_columns}"
+                        )
+                    if summary.transweave_early_promoted_columns:
+                        print(
+                            "    Early promoted:      "
+                            f"{summary.transweave_early_promoted_columns}"
+                        )
 
         return summary
 
@@ -1635,17 +1670,11 @@ class SequentialTrainer:
                 f"  Audit baseline: current_loss={baseline_current_loss:.4f}, old_loss={baseline_old_loss:.4f}"
             )
 
-        chosen_arr = np.asarray(chosen, dtype=np.int32)
-        unchosen_arr = np.asarray(unchosen, dtype=np.int32)
-        chosen_idx_grid, swap_in_grid = np.meshgrid(
-            np.arange(chosen_arr.size, dtype=np.int32),
-            unchosen_arr,
-            indexing="ij",
+        flat_swap_out, flat_swap_in = self._rank_teacher_audit_candidates(
+            chosen=chosen,
+            unchosen=unchosen,
+            max_swaps=max_swaps,
         )
-        swap_out_grid = chosen_arr[chosen_idx_grid]
-
-        flat_swap_out = swap_out_grid.reshape(-1)[:max_swaps]
-        flat_swap_in = swap_in_grid.reshape(-1)[:max_swaps]
         if flat_swap_out.size == 0:
             return []
 
@@ -1721,6 +1750,69 @@ class SequentialTrainer:
 
         return audit_rows
 
+    def _rank_teacher_audit_candidates(
+        self,
+        chosen: List[int],
+        unchosen: List[int],
+        max_swaps: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Rank boundary-teacher audit swaps toward reserve and low-reuse columns."""
+        if max_swaps <= 0 or not chosen or not unchosen:
+            return np.asarray([], dtype=np.int32), np.asarray([], dtype=np.int32)
+
+        support_cfg = self.config.support
+        usage_counts = self._teacher_column_usage_counts()
+        recent_usage_counts = self._teacher_column_usage_counts(
+            recent_task_window=int(support_cfg.teacher_boundary_recent_task_window)
+        )
+        reserve_start = max(
+            self.config.columns.shared_columns + self.config.columns.adaptive_columns,
+            self.config.columns.num_columns - self.config.columns.reserve_columns,
+        )
+
+        def score_swap_in(col: int) -> float:
+            reserve_bonus = (
+                float(support_cfg.teacher_boundary_candidate_reserve_bonus)
+                if col >= reserve_start
+                else 0.0
+            )
+            low_usage_bonus = float(
+                support_cfg.teacher_boundary_candidate_low_usage_bonus
+            ) / (1.0 + float(usage_counts.get(col, 0.0)))
+            recent_low_usage_bonus = float(
+                support_cfg.teacher_boundary_candidate_recent_low_usage_bonus
+            ) / (1.0 + float(recent_usage_counts.get(col, 0.0)))
+            return reserve_bonus + low_usage_bonus + recent_low_usage_bonus
+
+        def score_swap_out(col: int) -> float:
+            return float(usage_counts.get(col, 0.0)) + 1.5 * float(
+                recent_usage_counts.get(col, 0.0)
+            )
+
+        topk_in = max(1, int(support_cfg.teacher_boundary_candidate_topk_in))
+        topk_out = max(1, int(support_cfg.teacher_boundary_candidate_topk_out))
+        ranked_in = sorted(unchosen, key=score_swap_in, reverse=True)[:topk_in]
+        ranked_out = sorted(chosen, key=score_swap_out, reverse=True)[:topk_out]
+
+        candidate_pairs: List[Tuple[float, int, int]] = []
+        for swap_out in ranked_out:
+            for swap_in in ranked_in:
+                pair_score = score_swap_out(swap_out) + score_swap_in(swap_in)
+                candidate_pairs.append((pair_score, int(swap_out), int(swap_in)))
+
+        candidate_pairs.sort(key=lambda item: item[0], reverse=True)
+        candidate_pairs = candidate_pairs[:max_swaps]
+        if not candidate_pairs:
+            return np.asarray([], dtype=np.int32), np.asarray([], dtype=np.int32)
+
+        flat_swap_out = np.asarray(
+            [swap_out for _, swap_out, _ in candidate_pairs], dtype=np.int32
+        )
+        flat_swap_in = np.asarray(
+            [swap_in for _, _, swap_in in candidate_pairs], dtype=np.int32
+        )
+        return flat_swap_out, flat_swap_in
+
     def _apply_task_boundary_teacher(
         self,
         task_data: TaskData,
@@ -1757,6 +1849,7 @@ class SequentialTrainer:
         scored_rows = self._score_boundary_teacher_rows(
             audit_rows=audit_rows,
             initial_support=initial_support,
+            current_task_id=task_data.task_id,
         )
         best_row = max(
             scored_rows,
@@ -1768,6 +1861,10 @@ class SequentialTrainer:
         best_gain_normalized = float(best_row.get("combined_gain_normalized", 0.0))
         adjusted_gain = float(best_row.get("teacher_adjusted_gain", best_gain))
         total_penalty = float(best_row.get("teacher_total_penalty", 0.0))
+        retention_gain = float(best_row.get("teacher_retention_gain", 0.0))
+        max_early_harm = float(best_row.get("teacher_max_early_task_harm", 0.0))
+        task0_gain = float(best_row.get("teacher_task0_gain", 0.0))
+        task0_harm = float(best_row.get("teacher_task0_harm", 0.0))
         best_support = tuple(
             int(col) for col in best_row.get("alt_support", initial_support)
         )
@@ -1776,7 +1873,15 @@ class SequentialTrainer:
             and best_gain >= float(self.config.support.teacher_boundary_min_gain)
             and best_gain_normalized
             >= float(self.config.support.teacher_boundary_min_normalized_gain)
-            and adjusted_gain > 0.0
+            and adjusted_gain
+            >= float(self.config.support.teacher_boundary_min_adjusted_gain)
+            and max_early_harm
+            <= float(self.config.support.teacher_boundary_max_early_task_harm)
+            and (
+                not bool(self.config.support.teacher_boundary_require_task0_nonnegative)
+                or task0_gain >= 0.0
+            )
+            and task0_harm <= float(self.config.support.teacher_boundary_max_task0_harm)
         )
 
         if teacher_swap_applied:
@@ -1792,6 +1897,9 @@ class SequentialTrainer:
                     f" gain={best_gain:.6f}"
                     f" adjusted={adjusted_gain:.6f}"
                     f" penalty={total_penalty:.6f}"
+                    f" retention={retention_gain:.6f}"
+                    f" task0_gain={task0_gain:.6f}"
+                    f" early_harm={max_early_harm:.6f}"
                 )
         elif verbose:
             print(
@@ -1802,6 +1910,9 @@ class SequentialTrainer:
                 f" normalized={best_gain_normalized:.6f}"
                 f" adjusted={adjusted_gain:.6f}"
                 f" penalty={total_penalty:.6f}"
+                f" retention={retention_gain:.6f}"
+                f" task0_gain={task0_gain:.6f}"
+                f" early_harm={max_early_harm:.6f}"
             )
 
         return {
@@ -1821,6 +1932,10 @@ class SequentialTrainer:
             "teacher_best_gain": best_gain,
             "teacher_adjusted_gain": adjusted_gain,
             "teacher_total_penalty": total_penalty,
+            "teacher_retention_gain": retention_gain,
+            "teacher_max_early_task_harm": max_early_harm,
+            "teacher_task0_gain": task0_gain,
+            "teacher_task0_harm": task0_harm,
             "teacher_audit_rows": len(audit_rows),
         }
 
@@ -1947,6 +2062,7 @@ class SequentialTrainer:
         self,
         audit_rows: List[Dict[str, Any]],
         initial_support: Tuple[int, ...],
+        current_task_id: int,
     ) -> List[Dict[str, Any]]:
         """Apply conservative penalties to task-boundary teacher swap candidates."""
         if not audit_rows:
@@ -1958,6 +2074,39 @@ class SequentialTrainer:
         recent_usage_counts = self._teacher_column_usage_counts(
             recent_task_window=int(support_cfg.teacher_boundary_recent_task_window)
         )
+        retention_weight = float(support_cfg.teacher_boundary_retention_weight)
+        early_task_ids = self._teacher_early_task_ids(
+            current_task_id=current_task_id,
+            max_tasks=int(support_cfg.teacher_boundary_early_task_count),
+        )
+        early_task_batches: Dict[int, List[Tuple[np.ndarray, np.ndarray]]] = {}
+        early_task_weights: Dict[int, float] = {}
+        baseline_early_losses: Dict[int, float] = {}
+        if early_task_ids and retention_weight > 0.0:
+            max_batches = int(max(1, support_cfg.teacher_boundary_retention_batches))
+            for task_id in early_task_ids:
+                task = next(
+                    (task for task in self.tasks if task.task_id == task_id), None
+                )
+                if task is None:
+                    continue
+                batches = self._collect_batches(task.test_loader, max_batches)
+                if not batches:
+                    continue
+                early_task_batches[task_id] = batches
+                if task_id == 0:
+                    task_weight = float(support_cfg.teacher_boundary_task0_weight)
+                elif task_id == 1:
+                    task_weight = float(support_cfg.teacher_boundary_task1_weight)
+                else:
+                    task_weight = 1.0 / float(task_id + 1)
+                early_task_weights[task_id] = task_weight
+                baseline_early_losses[task_id] = self._evaluate_loss_on_batches(
+                    batches,
+                    task_id,
+                    initial_support,
+                    active_classes=task.classes,
+                )
 
         scored_rows: List[Dict[str, Any]] = []
         for row in audit_rows:
@@ -1988,10 +2137,45 @@ class SequentialTrainer:
                 * recent_reuse_gap
             )
             swap_penalty = float(support_cfg.teacher_boundary_swap_penalty)
+            retention_gain = 0.0
+            max_early_harm = 0.0
+            task0_gain = 0.0
+            task0_harm = 0.0
+            if early_task_batches and retention_weight > 0.0:
+                retention_total = 0.0
+                weight_total = 0.0
+                for task_id, batches in early_task_batches.items():
+                    task = next(
+                        (task for task in self.tasks if task.task_id == task_id), None
+                    )
+                    if task is None:
+                        continue
+                    alt_early_loss = self._evaluate_loss_on_batches(
+                        batches,
+                        task_id,
+                        alt_support,
+                        active_classes=task.classes,
+                    )
+                    base_early_loss = float(baseline_early_losses.get(task_id, 0.0))
+                    task_gain = base_early_loss - alt_early_loss
+                    task_harm = max(0.0, -task_gain)
+                    max_early_harm = max(max_early_harm, task_harm)
+                    if task_id == 0:
+                        task0_gain = task_gain
+                        task0_harm = task_harm
+                    task_weight = float(early_task_weights.get(task_id, 1.0))
+                    retention_total += task_weight * task_gain
+                    weight_total += task_weight
+                if weight_total > 0.0:
+                    retention_gain = retention_total / weight_total
             total_penalty = (
                 swap_penalty + overlap_penalty + reuse_penalty + recent_reuse_penalty
             )
-            adjusted_gain = float(row.get("combined_gain", 0.0)) - total_penalty
+            adjusted_gain = (
+                float(row.get("combined_gain", 0.0))
+                + retention_weight * retention_gain
+                - total_penalty
+            )
 
             row_scored = dict(row)
             row_scored["teacher_history_overlap"] = float(alt_overlap)
@@ -2000,9 +2184,28 @@ class SequentialTrainer:
             row_scored["teacher_recent_reuse_penalty"] = float(recent_reuse_penalty)
             row_scored["teacher_swap_penalty"] = float(swap_penalty)
             row_scored["teacher_total_penalty"] = float(total_penalty)
+            row_scored["teacher_retention_gain"] = float(retention_gain)
+            row_scored["teacher_max_early_task_harm"] = float(max_early_harm)
+            row_scored["teacher_task0_gain"] = float(task0_gain)
+            row_scored["teacher_task0_harm"] = float(task0_harm)
             row_scored["teacher_adjusted_gain"] = float(adjusted_gain)
             scored_rows.append(row_scored)
         return scored_rows
+
+    def _teacher_early_task_ids(
+        self,
+        current_task_id: int,
+        max_tasks: int,
+    ) -> List[int]:
+        """Return the earliest previously seen task ids to protect explicitly."""
+        if max_tasks <= 0:
+            return []
+        prior_ids = sorted(
+            task.task_id
+            for task in self.tasks
+            if int(task.task_id) < int(current_task_id)
+        )
+        return prior_ids[:max_tasks]
 
     def _teacher_column_usage_counts(
         self,
@@ -2222,6 +2425,10 @@ class SequentialTrainer:
             "composer_cost": 0.0,
             "shell_demotions": 0,
             "shell_promotions": 0,
+            "promoted_columns": (),
+            "early_promoted_columns": (),
+            "task0_promoted_columns": (),
+            "task1_promoted_columns": (),
         }
 
         task_id = task_data.task_id
@@ -2282,6 +2489,7 @@ class SequentialTrainer:
             # This compares new activities against historical patterns
             total_demotions = 0
             total_promotions = 0
+            promoted_columns: set[int] = set()
 
             column_activities = self._measure_column_activities(
                 task_id=task_id,
@@ -2351,6 +2559,8 @@ class SequentialTrainer:
                         column_assignments[col_id] = new_assignments
                         total_demotions += counts["demotions_applied"]
                         total_promotions += counts["promotions_applied"]
+                        if counts["promotions_applied"] > 0:
+                            promoted_columns.add(int(col_id))
 
             for col_id in range(num_columns):
                 self.transweave_manager.shell_transweave.register_shell_state(
@@ -2362,6 +2572,19 @@ class SequentialTrainer:
 
             stats["shell_demotions"] = total_demotions
             stats["shell_promotions"] = total_promotions
+            task0_support = set(self._task_supports.get(0, ()))
+            task1_support = set(self._task_supports.get(1, ()))
+            early_support = task0_support | task1_support
+            stats["promoted_columns"] = tuple(sorted(promoted_columns))
+            stats["early_promoted_columns"] = tuple(
+                sorted(col for col in promoted_columns if col in early_support)
+            )
+            stats["task0_promoted_columns"] = tuple(
+                sorted(col for col in promoted_columns if col in task0_support)
+            )
+            stats["task1_promoted_columns"] = tuple(
+                sorted(col for col in promoted_columns if col in task1_support)
+            )
 
         self._last_transweave_stats = stats
         return stats

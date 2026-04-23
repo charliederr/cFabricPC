@@ -31,7 +31,6 @@ class TrainingConfig:
     # Fast development mode
     fast_dev_max_train_batches: Optional[int] = None
     fast_dev_max_test_batches: Optional[int] = None
-
     # Training mode: "pc" (predictive coding), "backprop", or "hybrid"
     training_mode: str = "hybrid"
     task_local_head: bool = False
@@ -114,6 +113,20 @@ class SupportConfig:
     teacher_boundary_reuse_penalty: float = 0.0
     teacher_boundary_recent_reuse_penalty: float = 0.0
     teacher_boundary_recent_task_window: int = 2
+    teacher_boundary_retention_weight: float = 0.0
+    teacher_boundary_early_task_count: int = 2
+    teacher_boundary_retention_batches: int = 1
+    teacher_boundary_max_early_task_harm: float = 0.0
+    teacher_boundary_min_adjusted_gain: float = 0.0
+    teacher_boundary_task0_weight: float = 1.0
+    teacher_boundary_task1_weight: float = 1.0
+    teacher_boundary_require_task0_nonnegative: bool = False
+    teacher_boundary_max_task0_harm: float = 0.0
+    teacher_boundary_candidate_topk_in: int = 4
+    teacher_boundary_candidate_topk_out: int = 3
+    teacher_boundary_candidate_reserve_bonus: float = 1.0
+    teacher_boundary_candidate_low_usage_bonus: float = 0.5
+    teacher_boundary_candidate_recent_low_usage_bonus: float = 0.5
 
     # Replay bank
     replay_bank_support_enable: bool = True
@@ -853,24 +866,41 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.columns.memory_dim = 16
         cfg.columns.aggregator_dim = 96
 
-        cfg.shell_demotion_transweave.shell_sizes = (4, 8, 12)
+        cfg.shell_demotion_transweave.shell_sizes = (6, 10, 8)
         cfg.shell_demotion_transweave.max_demotions_per_step = 1
-        cfg.shell_demotion_transweave.warmup_steps = 8
-        cfg.shell_demotion_transweave.allow_inner_shell_transitions = False
-        cfg.shell_demotion_transweave.middle_shell_boundary_only = True
+        cfg.shell_demotion_transweave.warmup_steps = 2
+        cfg.shell_demotion_transweave.allow_inner_shell_transitions = True
+        cfg.shell_demotion_transweave.middle_shell_boundary_only = False
+        cfg.shell_demotion_transweave.demotion_threshold = 0.18
+        cfg.shell_demotion_transweave.promotion_threshold = 0.10
+        cfg.shell_demotion_transweave.protected_center_fraction = 0.80
 
         cfg.support.causal_min_examples = 8
         cfg.support.causal_target_examples = 24
         cfg.support.causal_agreement_target = 0.25
-        cfg.support.teacher_boundary_min_gain = 0.015
-        cfg.support.teacher_boundary_min_normalized_gain = 0.020
+        cfg.support.teacher_boundary_min_gain = 0.004
+        cfg.support.teacher_boundary_min_normalized_gain = 0.003
+        cfg.support.teacher_boundary_min_adjusted_gain = 0.002
         cfg.support.teacher_boundary_swap_penalty = 0.004
         cfg.support.teacher_boundary_overlap_penalty = 0.020
         cfg.support.teacher_boundary_reuse_penalty = 0.004
         cfg.support.teacher_boundary_recent_reuse_penalty = 0.006
         cfg.support.teacher_boundary_recent_task_window = 2
+        cfg.support.teacher_boundary_retention_weight = 0.50
+        cfg.support.teacher_boundary_early_task_count = 2
+        cfg.support.teacher_boundary_retention_batches = 1
+        cfg.support.teacher_boundary_max_early_task_harm = 0.002
+        cfg.support.teacher_boundary_task0_weight = 3.0
+        cfg.support.teacher_boundary_task1_weight = 1.5
+        cfg.support.teacher_boundary_require_task0_nonnegative = True
+        cfg.support.teacher_boundary_max_task0_harm = 0.0
+        cfg.support.teacher_boundary_candidate_topk_in = 5
+        cfg.support.teacher_boundary_candidate_topk_out = 3
+        cfg.support.teacher_boundary_candidate_reserve_bonus = 1.5
+        cfg.support.teacher_boundary_candidate_low_usage_bonus = 0.8
+        cfg.support.teacher_boundary_candidate_recent_low_usage_bonus = 0.6
         cfg.audit.audit_batches_per_task = 2
-        cfg.audit.support_swap_audit_max_swaps = 4
+        cfg.audit.support_swap_audit_max_swaps = 8
         cfg.audit.support_audit_max_batches = 1
     else:
         cfg.training.epochs_per_task = 3
@@ -893,23 +923,40 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
 
         cfg.shell_demotion_transweave.shell_sizes = (10, 20, 30)
         cfg.shell_demotion_transweave.max_demotions_per_step = 1
-        cfg.shell_demotion_transweave.warmup_steps = 80
-        cfg.shell_demotion_transweave.allow_inner_shell_transitions = False
-        cfg.shell_demotion_transweave.middle_shell_boundary_only = True
+        cfg.shell_demotion_transweave.warmup_steps = 20
+        cfg.shell_demotion_transweave.allow_inner_shell_transitions = True
+        cfg.shell_demotion_transweave.middle_shell_boundary_only = False
+        cfg.shell_demotion_transweave.demotion_threshold = 0.18
+        cfg.shell_demotion_transweave.promotion_threshold = 0.10
+        cfg.shell_demotion_transweave.protected_center_fraction = 0.85
 
         cfg.support.causal_min_examples = 16
         cfg.support.causal_target_examples = 60
         cfg.support.causal_agreement_target = 0.25
-        cfg.support.teacher_boundary_min_gain = 0.020
-        cfg.support.teacher_boundary_min_normalized_gain = 0.030
+        cfg.support.teacher_boundary_min_gain = 0.006
+        cfg.support.teacher_boundary_min_normalized_gain = 0.004
+        cfg.support.teacher_boundary_min_adjusted_gain = 0.0025
         cfg.support.teacher_boundary_swap_penalty = 0.005
         cfg.support.teacher_boundary_overlap_penalty = 0.025
         cfg.support.teacher_boundary_reuse_penalty = 0.005
         cfg.support.teacher_boundary_recent_reuse_penalty = 0.010
         cfg.support.teacher_boundary_recent_task_window = 2
+        cfg.support.teacher_boundary_retention_weight = 0.75
+        cfg.support.teacher_boundary_early_task_count = 2
+        cfg.support.teacher_boundary_retention_batches = 1
+        cfg.support.teacher_boundary_max_early_task_harm = 0.003
+        cfg.support.teacher_boundary_task0_weight = 4.0
+        cfg.support.teacher_boundary_task1_weight = 2.0
+        cfg.support.teacher_boundary_require_task0_nonnegative = True
+        cfg.support.teacher_boundary_max_task0_harm = 0.0
+        cfg.support.teacher_boundary_candidate_topk_in = 6
+        cfg.support.teacher_boundary_candidate_topk_out = 4
+        cfg.support.teacher_boundary_candidate_reserve_bonus = 1.5
+        cfg.support.teacher_boundary_candidate_low_usage_bonus = 0.8
+        cfg.support.teacher_boundary_candidate_recent_low_usage_bonus = 0.8
         cfg.audit.audit_batches_per_task = 2
         cfg.audit.support_swap_audit_enable = True
-        cfg.audit.support_swap_audit_max_swaps = 4
+        cfg.audit.support_swap_audit_max_swaps = 10
         cfg.audit.support_audit_max_batches = 1
 
     cfg.support.topk_nonshared = cfg.columns.topk_nonshared
