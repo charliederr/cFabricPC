@@ -128,6 +128,14 @@ class SupportConfig:
     teacher_boundary_candidate_low_usage_bonus: float = 0.5
     teacher_boundary_candidate_recent_low_usage_bonus: float = 0.5
 
+    # Promotion-aware recurrence
+    promotion_reuse_start_task: int = 2
+    promotion_reuse_slots: int = 0
+    promotion_reuse_min_promotions: int = 1
+    promotion_reuse_early_bonus: float = 2.0
+    promotion_reuse_recency_bonus: float = 0.5
+    promotion_reuse_usage_penalty: float = 0.25
+
     # Replay bank
     replay_bank_support_enable: bool = True
     replay_bank_support_oldtask_only: bool = False
@@ -679,7 +687,7 @@ def make_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.shell_demotion_transweave.enable = True
         cfg.shell_demotion_transweave.sinkhorn_iters = 4
         cfg.shell_demotion_transweave.shell_sizes = (2, 4, 2)
-        cfg.shell_demotion_transweave.max_demotions_per_step = 1
+        cfg.shell_demotion_transweave.max_demotions_per_step = 3
         cfg.shell_demotion_transweave.use_last_k_tasks = 1
 
         # Task-start transition autotune preset for smoke tests
@@ -867,7 +875,7 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.columns.aggregator_dim = 96
 
         cfg.shell_demotion_transweave.shell_sizes = (6, 10, 8)
-        cfg.shell_demotion_transweave.max_demotions_per_step = 1
+        cfg.shell_demotion_transweave.max_demotions_per_step = 3
         cfg.shell_demotion_transweave.warmup_steps = 2
         cfg.shell_demotion_transweave.allow_inner_shell_transitions = True
         cfg.shell_demotion_transweave.middle_shell_boundary_only = False
@@ -899,6 +907,12 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.support.teacher_boundary_candidate_reserve_bonus = 1.5
         cfg.support.teacher_boundary_candidate_low_usage_bonus = 0.8
         cfg.support.teacher_boundary_candidate_recent_low_usage_bonus = 0.6
+        cfg.support.promotion_reuse_start_task = 2
+        cfg.support.promotion_reuse_slots = 1
+        cfg.support.promotion_reuse_min_promotions = 1
+        cfg.support.promotion_reuse_early_bonus = 2.5
+        cfg.support.promotion_reuse_recency_bonus = 0.6
+        cfg.support.promotion_reuse_usage_penalty = 0.20
         cfg.audit.audit_batches_per_task = 2
         cfg.audit.support_swap_audit_max_swaps = 8
         cfg.audit.support_audit_max_batches = 1
@@ -954,6 +968,12 @@ def make_cifar10_protocol_config(quick_smoke: bool = False) -> ExperimentConfig:
         cfg.support.teacher_boundary_candidate_reserve_bonus = 1.5
         cfg.support.teacher_boundary_candidate_low_usage_bonus = 0.8
         cfg.support.teacher_boundary_candidate_recent_low_usage_bonus = 0.8
+        cfg.support.promotion_reuse_start_task = 2
+        cfg.support.promotion_reuse_slots = 1
+        cfg.support.promotion_reuse_min_promotions = 1
+        cfg.support.promotion_reuse_early_bonus = 2.5
+        cfg.support.promotion_reuse_recency_bonus = 0.6
+        cfg.support.promotion_reuse_usage_penalty = 0.20
         cfg.audit.audit_batches_per_task = 2
         cfg.audit.support_swap_audit_enable = True
         cfg.audit.support_swap_audit_max_swaps = 10

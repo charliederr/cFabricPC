@@ -646,6 +646,9 @@ class SupportManager:
             "causal_swap_threshold": 0.0,
             "causal_skip_reason": "init",
         }
+        self.promoted_column_counts: Dict[int, int] = {}
+        self.promoted_column_last_task: Dict[int, int] = {}
+        self.early_promoted_columns: set[int] = set()
 
     def select_support_for_task(
         self,
@@ -704,6 +707,8 @@ class SupportManager:
                     )
                 else:
                     selected = tuple(candidate_pool[:columns_per_task])
+
+        selected = self._apply_promotion_reuse(task_id, selected)
 
         min_reserve = (
             int(getattr(self.config, "reserve_min_usage", 0) or 0) if self.config else 0
@@ -770,6 +775,99 @@ class SupportManager:
         self.set_causal_guidance_on_state(task_id)
 
         return self.current_state
+
+    def register_promoted_columns(
+        self,
+        task_id: int,
+        promoted_columns: Sequence[int],
+        early_promoted_columns: Sequence[int] = (),
+    ) -> None:
+        """Record columns whose shell state promoted inward at task end."""
+        for col in promoted_columns:
+            col = int(col)
+            if col < self.num_shared or col >= self.num_columns:
+                continue
+            self.promoted_column_counts[col] = (
+                self.promoted_column_counts.get(col, 0) + 1
+            )
+            self.promoted_column_last_task[col] = int(task_id)
+        for col in early_promoted_columns:
+            col = int(col)
+            if self.num_shared <= col < self.num_columns:
+                self.early_promoted_columns.add(col)
+
+    def _apply_promotion_reuse(
+        self,
+        task_id: int,
+        selected: Sequence[int],
+    ) -> Tuple[int, ...]:
+        """Allow a small amount of natural recurrence from historically promoted columns."""
+        if self.config is None:
+            return tuple(int(col) for col in selected)
+
+        start_task = int(getattr(self.config, "promotion_reuse_start_task", 2) or 0)
+        reuse_slots = int(getattr(self.config, "promotion_reuse_slots", 0) or 0)
+        min_promotions = int(
+            getattr(self.config, "promotion_reuse_min_promotions", 1) or 1
+        )
+        if task_id < start_task or reuse_slots <= 0 or not self.promoted_column_counts:
+            return tuple(int(col) for col in selected)
+
+        selected_list = [int(col) for col in selected]
+        if not selected_list:
+            return tuple()
+
+        support_usage_counts: Dict[int, int] = {}
+        for row in self.support_bank.rows:
+            for col in row.support_cols:
+                col = int(col)
+                if col >= self.num_shared:
+                    support_usage_counts[col] = support_usage_counts.get(col, 0) + 1
+
+        early_bonus = float(getattr(self.config, "promotion_reuse_early_bonus", 2.0))
+        recency_bonus = float(
+            getattr(self.config, "promotion_reuse_recency_bonus", 0.5)
+        )
+        usage_penalty = float(
+            getattr(self.config, "promotion_reuse_usage_penalty", 0.25)
+        )
+        candidate_pool = set(self._adaptive_pool) | set(self._reserve_pool)
+        candidates: List[Tuple[float, int]] = []
+        for col, count in self.promoted_column_counts.items():
+            col = int(col)
+            if (
+                col not in candidate_pool
+                or col in selected_list
+                or count < min_promotions
+            ):
+                continue
+            score = float(count)
+            if col in self.early_promoted_columns:
+                score += early_bonus
+            last_task = self.promoted_column_last_task.get(col, -1)
+            if last_task >= 0:
+                score += recency_bonus / (1.0 + max(task_id - int(last_task), 0))
+            score -= usage_penalty * float(support_usage_counts.get(col, 0))
+            candidates.append((score, col))
+
+        if not candidates:
+            return tuple(selected_list)
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        chosen_reuse: List[int] = []
+        for _, col in candidates:
+            if col not in chosen_reuse:
+                chosen_reuse.append(int(col))
+            if len(chosen_reuse) >= min(reuse_slots, len(selected_list)):
+                break
+
+        if not chosen_reuse:
+            return tuple(selected_list)
+
+        keep_count = max(0, len(selected_list) - len(chosen_reuse))
+        fresh_kept = selected_list[:keep_count]
+        final_selected = tuple(sorted(fresh_kept + chosen_reuse))
+        return final_selected[: self.topk_nonshared]
 
     def set_support_for_task(
         self,
@@ -1151,6 +1249,9 @@ class SupportManager:
                 "trust": self.trust_controller.trust,
                 "history": self.trust_controller.history,
             },
+            "promoted_column_counts": dict(self.promoted_column_counts),
+            "promoted_column_last_task": dict(self.promoted_column_last_task),
+            "early_promoted_columns": sorted(self.early_promoted_columns),
             # Causal components
             "causal_bank": (
                 self.causal_bank.save_state() if self.causal_bank else None
@@ -1205,6 +1306,16 @@ class SupportManager:
         tc = state["trust_controller"]
         self.trust_controller.trust = tc["trust"]
         self.trust_controller.history = tc["history"]
+        self.promoted_column_counts = {
+            int(k): int(v) for k, v in state.get("promoted_column_counts", {}).items()
+        }
+        self.promoted_column_last_task = {
+            int(k): int(v)
+            for k, v in state.get("promoted_column_last_task", {}).items()
+        }
+        self.early_promoted_columns = {
+            int(col) for col in state.get("early_promoted_columns", [])
+        }
 
         # Restore causal components
         if "causal_bank" in state and self.causal_bank is not None:

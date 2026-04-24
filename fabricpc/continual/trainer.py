@@ -2587,6 +2587,11 @@ class SequentialTrainer:
             )
 
         self._last_transweave_stats = stats
+        self.support_manager.register_promoted_columns(
+            task_id=task_id,
+            promoted_columns=stats.get("promoted_columns", ()),
+            early_promoted_columns=stats.get("early_promoted_columns", ()),
+        )
         return stats
 
     @property

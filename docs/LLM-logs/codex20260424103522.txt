@@ -1,0 +1,140 @@
+• The patched smoke run is underway. The main thing I’m checking is whether task 3/4 supports now include previously promoted early columns naturally, not just whether promotion counts go up.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36 --reserve-
+columns 8
+
+• I don’t have task output yet from the smoke run, but the code is still active. I’m waiting for the first task summaries because those will show whether support selection has actually started reusing promoted columns.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36 --reserve-
+columns 8
+
+• Task 0 confirmed the existing setup for the first task. The important check is tasks 2-4, because that’s where promotion-aware recurrence should start replacing “all fresh columns” with a small amount of early promoted reuse.
+
+• Ran ps -p 1667154 -o pid,etime,pcpu,pmem,cmd
+  └     PID     ELAPSED %CPU %MEM CMD
+    1667154       04:25  119  5.7 /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36
+    --reserve-columns 8
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36 --reserve-
+columns 8
+
+─ Worked for 9m 34s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Task 1 already shows the new path starting to matter: support is no longer a pure fresh sequential block, because the teacher pulled in an older/promoted candidate (41). I’m waiting for tasks 2-4, where promotion-aware
+  recurrence should become the dominant difference.
+
+• Waited for background terminal · /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36 --reserve-
+columns 8
+
+• Ran /home/ni/repos/freeFabricPC/virt-envs/ffpc1/bin/python examples/split_cifar10_columnar.py --quick-smoke --causal-scale 0.0 --num-columns 48 --shared-columns 4 --adaptive-columns 36 --reserve-columns 8
+  └ WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+    I0000 00:00:1776965054.491904 1667154 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off,
+    … +301 lines (ctrl + t to view transcript)
+
+    Done!
+
+─ Worked for 17m 09s ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The patch is in, and I validated it on the no-replay 48-column smoke run in results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260423_132417.
+
+  I added promotion-aware recurrence wiring in:
+
+  - cFabricPC/fabricpc/continual/config.py
+  - cFabricPC/fabricpc/continual/support.py
+  - cFabricPC/fabricpc/continual/trainer.py
+
+  Result: no metric improvement.
+
+  - average test accuracy: 0.4938
+  - average forgetting: 0.0156
+  - task-0 final accuracy: 0.5938
+  - task-1 final accuracy: 0.4688
+  - final-row mean: 0.4813
+
+  The important diagnosis is new and useful: the promoted columns are mostly the shared columns plus the always-used reserve column, not the task-specific nonshared columns we needed to preserve naturally.
+
+  - task 3 promotions: (1, 2, 40)
+  - early promoted: (1, 2, 40)
+
+  That explains why the recurrence patch had no effect on support selection:
+
+  - columns 1 and 2 are shared, so they are already always active
+  - column 40 is the reserve column already present in every task’s support
+  - so the system is promoting columns that were already recurrent, not migrating early task-specific content inward inside its own nonshared columns
+
+  Recommendation for the next step:
+
+  - stop tuning recurrence-at-selection for now
+  - patch shell promotion scoring itself so promotions prefer early task-specific nonshared columns and penalize shared columns for inward promotion
+  - in other words: change what gets stabilized, not how stabilized columns are reused
+
+  That is now the highest-signal next move if we want natural, no-replay retention.
+
+
+› for your average test accuracy are you evaluating 1 out of 10 categories or 1 out of 2 categories?
+
+
+• 1 out of 2 categories.
+
+  These Split-CIFAR10 runs use task-local binary heads:
+
+  - task 0 evaluates classes (0,1)
+  - task 1 evaluates (2,3)
+  - ...
+  - task 4 evaluates (8,9)
+
+  So the reported per-task accuracy and the “average test accuracy” are binary accuracies within each task’s 2-class slice, not a global 10-way CIFAR10 accuracy.
+
+  Chance level here is therefore about 0.50, not 0.10.
+
+  That’s why results like:
+
+  - task-0 final 0.5938
+  - average test 0.4938
+
+  mean the system is only slightly above or around binary chance on several tasks, which is weaker than it might look if interpreted as 10-way CIFAR10.
+
+
+› please make a zip file of all the contents of results/ named results.zip
+
+
+• I’m packaging /home/ni/repos/freeFabricPC/results into a single archive at /home/ni/repos/freeFabricPC/results.zip.
+
+• The sandbox blocked the archive command, so I’m rerunning it outside the sandbox.
+
+✔ You approved codex to run zip -r /home/ni/repos/freeFabricPC/results.zip /home/ni/repos/freeFabricPC/re... this time
+
+• Waited for background terminal
+
+• Ran zip -r /home/ni/repos/freeFabricPC/results.zip /home/ni/repos/freeFabricPC/results
+  └  (deflated 0%)
+      adding: home/ni/repos/freeFabricPC/results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260420_114840/accuracy_matrix.png (deflated 12%)
+    … +886 lines (ctrl + t to view transcript)
+      adding: home/ni/repos/freeFabricPC/results/split_cifar100/split_cifar100_seed42_20260419_032658/checkpoint_task_5.json (deflated 85%)
+      adding: home/ni/repos/freeFabricPC/results/split_cifar100/split_cifar100_seed42_20260419_032658/checkpoint_task_7.npz
+
+• The archive is still being written because results/ is large. I’m waiting for zip to finish so I can confirm the file is complete.
+
+• Waited for background terminal
+
+• Ran zip -r /home/ni/repos/freeFabricPC/results.zip /home/ni/repos/freeFabricPC/results
+  └  (deflated 0%)
+      adding: home/ni/repos/freeFabricPC/results/split_cifar10_columnar/split_cifar10_columnar_seed42_20260420_114840/accuracy_matrix.png (deflated 12%)
+    … +1507 lines (ctrl + t to view transcript)
+      adding: home/ni/repos/freeFabricPC/results/split_mnist/split_mnist_seed42_20260407_060336/checkpoint_task_0.npz (deflated 0%)
+      adding: home/ni/repos/freeFabricPC/results/split_mnist/split_mnist_seed42_20260407_060336/forgetting_analysis.png (deflated 12%)
+
+─ Worked for 8m 22s ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The archive finished. I’m verifying that results.zip exists and has a nonzero size.
+
+• Explored
+  └ List results.zip
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Created results.zip.
+
+  Size: 28G
+Token usage: total=6,683,129 input=6,391,873 (+ 119,980,160 cached) output=291,256 (reasoning 63,169)
+To continue this session, run codex resume 019da2b2-56dd-7e22-ac00-62bd861ba419
