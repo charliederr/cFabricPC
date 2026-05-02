@@ -6,7 +6,7 @@ pmap across multiple devices. All functions work transparently on
 1 or N devices.
 """
 
-from typing import Dict, Tuple, Any, cast, List, Optional, Callable
+from typing import Dict, Tuple, Any, cast, List, Optional, Callable, Union
 import math
 import warnings
 import jax
@@ -294,7 +294,12 @@ def train_pcn(
     epoch_callback: Optional[Callable] = None,
     iter_callback: Optional[Callable] = None,
     pmap_single_device: bool = False,
-) -> Tuple[GraphParams, List[Any], List[Any]]:
+    opt_state: Optional[optax.OptState] = None,
+    return_opt_state: bool = False,
+) -> Union[
+    Tuple[GraphParams, List[Any], List[Any]],
+    Tuple[GraphParams, List[Any], List[Any], optax.OptState],
+]:
     """
     Train a predictive coding network with local learning.
 
@@ -317,12 +322,13 @@ def train_pcn(
             (epoch_idx, batch_idx, energy) -> any
         pmap_single_device: If True, forces the pmap code path even on a
             single device. Useful for testing pmap logic.
+        opt_state: Optional optimizer state. If provided, training starts
+            from this state instead of initializing a new one.
+        return_opt_state: If True, returns (params, iter_results, epoch_results, opt_state).
+            Otherwise returns 3-tuple (params, iter_results, epoch_results).
 
     Returns:
-        Tuple of (trained_params, iter_results, epoch_results):
-        - trained_params: Updated model parameters
-        - iter_results: 2D list of energy values [epochs][batches]
-        - epoch_results: List of epoch_callback return values
+        Trained parameters and results.
 
     Example:
         >>> rng_key = jax.random.PRNGKey(0)
@@ -342,12 +348,14 @@ def train_pcn(
         print(f"Training on {n_devices} device(s): {jax.devices()}")
 
     # Initialize optimizer
-    opt_state = optimizer.init(params)
+    if opt_state is None:
+        opt_state = optimizer.init(params)
 
     # Set up step function based on device path
     if use_pmap:
         params = replicate_params(params, n_devices)
-        opt_state = replicate_opt_state(opt_state, n_devices)
+        if jax.tree_util.tree_leaves(opt_state)[0].ndim < 2:
+            opt_state = replicate_opt_state(opt_state, n_devices)
         step_fn = create_pmap_train_step(structure, optimizer)
     else:
         step_fn = jax.jit(
@@ -472,6 +480,8 @@ def train_pcn(
     if use_pmap:
         params = jax.tree_util.tree_map(lambda x: x[0], params)
 
+    if return_opt_state:
+        return params, iter_results, epoch_results, opt_state
     return params, iter_results, epoch_results
 
 

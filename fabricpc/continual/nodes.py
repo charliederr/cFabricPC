@@ -5,13 +5,15 @@ Implements specialized nodes for the hierarchical column-based architecture
 used in Split-MNIST continual learning experiments.
 """
 
-from typing import Dict, Any, Tuple, Optional, Sequence
+from typing import Dict, Any, Tuple, Optional, Sequence, List
 import math
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from fabricpc.nodes.base import NodeBase, SlotSpec, FlattenInputMixin
+from fabricpc.nodes.conv import Conv2DNode, Pool2DNode
+from fabricpc.builder import Edge
 from fabricpc.core.types import NodeParams, NodeState, NodeInfo
 from fabricpc.core.initializers import NormalInitializer, initialize
 from fabricpc.core.activations import (
@@ -1099,3 +1101,73 @@ class PartitionedAggregator(NodeBase):
         total_energy = jnp.sum(state.energy)
 
         return total_energy, state
+
+
+def create_visual_stem(
+    input_node: NodeBase,
+    stem_channels: Tuple[int, int, int] = (32, 64, 64),
+    patch_pool_size: int = 2,
+    activation=ReLUActivation(),
+) -> Tuple[List[NodeBase], List[Edge], NodeBase]:
+    """
+    Create a convolutional visual stem as described in HiBaCaML PDF.
+
+    Conv(3, 32, 3x3) -> Conv(32, 64, 3x3, stride 2) -> Conv(64, 64, 3x3)
+    followed by light patch pooling.
+
+    Args:
+        input_node: The input IdentityNode (B, H, W, C)
+        stem_channels: Channels for the 3 conv layers
+        patch_pool_size: Window size/stride for final pooling
+        activation: Activation function for conv layers
+
+    Returns:
+        (nodes, edges, last_node)
+    """
+    h, w, c = input_node._shape
+    c1, c2, c3 = stem_channels
+
+    conv1 = Conv2DNode(
+        shape=(h, w, c1),
+        kernel_size=(3, 3),
+        stride=(1, 1),
+        padding="SAME",
+        activation=activation,
+        name="stem_conv1",
+    )
+
+    conv2 = Conv2DNode(
+        shape=(h // 2, w // 2, c2),
+        kernel_size=(3, 3),
+        stride=(2, 2),
+        padding="SAME",
+        activation=activation,
+        name="stem_conv2",
+    )
+
+    conv3 = Conv2DNode(
+        shape=(h // 2, w // 2, c3),
+        kernel_size=(3, 3),
+        stride=(1, 1),
+        padding="SAME",
+        activation=activation,
+        name="stem_conv3",
+    )
+
+    pool = Pool2DNode(
+        shape=(h // (2 * patch_pool_size), w // (2 * patch_pool_size), c3),
+        window_shape=(patch_pool_size, patch_pool_size),
+        stride=(patch_pool_size, patch_pool_size),
+        pooling_type="avg",
+        name="stem_pool",
+    )
+
+    nodes = [conv1, conv2, conv3, pool]
+    edges = [
+        Edge(source=input_node, target=conv1.slot("in")),
+        Edge(source=conv1, target=conv2.slot("in")),
+        Edge(source=conv2, target=conv3.slot("in")),
+        Edge(source=conv3, target=pool.slot("in")),
+    ]
+
+    return nodes, edges, pool

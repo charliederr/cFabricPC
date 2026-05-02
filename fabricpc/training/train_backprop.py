@@ -15,7 +15,7 @@ Use cases:
 - Standard deep learning workflows
 """
 
-from typing import Dict, Tuple, Any, List, Optional, Callable, cast
+from typing import Dict, Tuple, Any, List, Optional, Callable, cast, Union
 import math
 import jax
 import jax.numpy as jnp
@@ -132,7 +132,12 @@ def train_backprop(
     verbose: bool = True,
     epoch_callback: Optional[Callable] = None,
     iter_callback: Optional[Callable] = None,
-) -> Tuple[GraphParams, List[List[float]], List[Any]]:
+    opt_state: Optional[optax.OptState] = None,
+    return_opt_state: bool = False,
+) -> Union[
+    Tuple[GraphParams, List[List[float]], List[Any]],
+    Tuple[GraphParams, List[List[float]], List[Any], optax.OptState],
+]:
     """
     Main backprop training loop.
 
@@ -168,7 +173,8 @@ def train_backprop(
     """
     validate_feedforward_init(structure)
 
-    opt_state = optimizer.init(params)
+    if opt_state is None:
+        opt_state = optimizer.init(params)
 
     # Training hyperparameters
     num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
@@ -251,6 +257,8 @@ def train_backprop(
         if verbose:
             print(f"Epoch {epoch_idx + 1}/{total_epochs}, Loss: {avg_loss:.4f}")
 
+    if return_opt_state:
+        return params, iter_results, epoch_results, opt_state
     return params, iter_results, epoch_results
 
 
@@ -361,7 +369,12 @@ def train_backprop_autoregressive(
     verbose: bool = True,
     epoch_callback: Optional[Callable] = None,
     iter_callback: Optional[Callable] = None,
-) -> Tuple[GraphParams, List[List[float]], List[Any]]:
+    opt_state: Optional[optax.OptState] = None,
+    return_opt_state: bool = False,
+) -> Union[
+    Tuple[GraphParams, List[List[float]], List[Any]],
+    Tuple[GraphParams, List[List[float]], List[Any], optax.OptState],
+]:
     """
     Main autoregressive backprop training loop.
 
@@ -386,7 +399,8 @@ def train_backprop_autoregressive(
     """
     validate_feedforward_init(structure)
 
-    opt_state = optimizer.init(params)
+    if opt_state is None:
+        opt_state = optimizer.init(params)
 
     # Training hyperparameters
     num_epochs = config.get("num_epochs", 10)  # supports float (e.g. 1.5)
@@ -472,6 +486,8 @@ def train_backprop_autoregressive(
                 f"Epoch {epoch_idx + 1}/{total_epochs}, Loss: {avg_loss:.4f}, Perplexity: {perplexity:.2f}"
             )
 
+    if return_opt_state:
+        return params, iter_results, epoch_results, opt_state
     return params, iter_results, epoch_results
 
 

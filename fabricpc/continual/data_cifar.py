@@ -1,29 +1,30 @@
 """
-Split-CIFAR-100 Data Loading for Continual Learning.
+Split-CIFAR Data Loading for Continual Learning.
 
 Provides JAX-compatible data loaders for sequential task learning on
-CIFAR-100 split into groups of classes. Structured to mirror the Split-MNIST
-loader in ``fabricpc.continual.data`` so the same SequentialTrainer can
-consume it unchanged.
+CIFAR-10 and CIFAR-100 split into groups of classes.
 """
 
 from dataclasses import dataclass
-from typing import Tuple, List, Optional, Iterator, Sequence
+from typing import Tuple, List, Optional, Iterator, Sequence, Any
 import numpy as np
 
 from fabricpc.utils.data.data_utils import one_hot
 from fabricpc.continual.data import TaskData
 
+# CIFAR normalization stats
+CIFAR10_MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
+CIFAR10_STD = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
+
 CIFAR100_MEAN = np.array([0.5071, 0.4865, 0.4409], dtype=np.float32)
 CIFAR100_STD = np.array([0.2673, 0.2564, 0.2762], dtype=np.float32)
 
 
-class SplitCifar100TaskLoader:
+class SplitCifarTaskLoader:
     """
-    Data loader for a single Split-CIFAR-100 task (a group of classes).
+    Data loader for a single Split-CIFAR task (a group of classes).
 
-    Yields (images, one_hot_labels). Images are per-channel normalized and,
-    in ``"flat"`` tensor_format, flattened to (N, 3072).
+    Yields (images, one_hot_labels). Images are per-channel normalized.
     """
 
     def __init__(
@@ -31,14 +32,18 @@ class SplitCifar100TaskLoader:
         images: np.ndarray,
         labels: np.ndarray,
         batch_size: int,
+        mean: np.ndarray,
+        std: np.ndarray,
         shuffle: bool = True,
         seed: Optional[int] = None,
         tensor_format: str = "flat",
-        num_classes: int = 100,
+        num_classes: int = 10,
     ):
         self.images = images
         self.labels = labels
         self.batch_size = batch_size
+        self.mean = mean
+        self.std = std
         self.shuffle = shuffle
         self.seed = seed
         self.tensor_format = tensor_format
@@ -65,7 +70,8 @@ class SplitCifar100TaskLoader:
             batch_images = self.images[batch_idx].astype(np.float32)
             batch_labels = self.labels[batch_idx]
 
-            batch_images = (batch_images - CIFAR100_MEAN) / CIFAR100_STD
+            # Normalize
+            batch_images = (batch_images - self.mean) / self.std
 
             if self.tensor_format == "flat":
                 batch_images = batch_images.reshape(len(batch_idx), -1)
@@ -78,27 +84,32 @@ class SplitCifar100TaskLoader:
             yield batch_images, batch_labels_onehot
 
 
-def _load_cifar100_keras():
-    """Load CIFAR-100 via keras.datasets (uses fine labels)."""
+def _load_cifar_keras(dataset_name="cifar10"):
+    """Load CIFAR via keras.datasets."""
     try:
-        from tensorflow.keras.datasets import cifar100
+        from tensorflow.keras.datasets import cifar10, cifar100
 
-        (train_images, train_labels), (test_images, test_labels) = cifar100.load_data(
-            label_mode="fine"
-        )
+        if dataset_name == "cifar10":
+            (train_images, train_labels), (test_images, test_labels) = (
+                cifar10.load_data()
+            )
+        else:
+            (train_images, train_labels), (test_images, test_labels) = (
+                cifar100.load_data(label_mode="fine")
+            )
         return train_images, train_labels, test_images, test_labels
     except ImportError:
         return None
     except Exception as e:
         print(
-            f"Keras CIFAR-100 load failed ({type(e).__name__}: {e}); "
+            f"Keras {dataset_name} load failed ({type(e).__name__}: {e}); "
             "falling back to manual download."
         )
         return None
 
 
-def _load_cifar100_manual(data_root: str):
-    """Download CIFAR-100 python tarball and parse it without any TF dependency."""
+def _load_cifar_manual(dataset_name="cifar10", data_root="./data"):
+    """Download CIFAR python tarball and parse it without any TF dependency."""
     import os
     import tarfile
     import pickle
@@ -106,14 +117,22 @@ def _load_cifar100_manual(data_root: str):
     import urllib.request
     import ssl
 
-    url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
-    tar_path = os.path.join(data_root, "cifar-100-python.tar.gz")
-    extract_dir = os.path.join(data_root, "cifar-100-python")
+    if dataset_name == "cifar10":
+        url = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+        tar_name = "cifar-10-python.tar.gz"
+        extract_name = "cifar-10-batches-py"
+    else:
+        url = "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz"
+        tar_name = "cifar-100-python.tar.gz"
+        extract_name = "cifar-100-python"
+
+    tar_path = os.path.join(data_root, tar_name)
+    extract_dir = os.path.join(data_root, extract_name)
     os.makedirs(data_root, exist_ok=True)
 
     if not os.path.exists(extract_dir):
         if not os.path.exists(tar_path):
-            print("Downloading CIFAR-100 (~170MB)...")
+            print(f"Downloading {dataset_name} (~170MB)...")
             try:
                 import certifi
 
@@ -132,38 +151,51 @@ def _load_cifar100_manual(data_root: str):
         with open(path, "rb") as f:
             return pickle.load(f, encoding="bytes")
 
-    train = _unpickle(os.path.join(extract_dir, "train"))
-    test = _unpickle(os.path.join(extract_dir, "test"))
+    if dataset_name == "cifar10":
+        train_images = []
+        train_labels = []
+        for i in range(1, 6):
+            batch = _unpickle(os.path.join(extract_dir, f"data_batch_{i}"))
+            train_images.append(batch[b"data"])
+            train_labels.extend(batch[b"labels"])
+        train_images = (
+            np.concatenate(train_images).reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+        )
+        train_labels = np.array(train_labels, dtype=np.int32)
 
-    def _reshape(batch):
-        data = batch[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
-        labels = np.array(batch[b"fine_labels"], dtype=np.int32)
-        return data, labels
+        test = _unpickle(os.path.join(extract_dir, "test_batch"))
+        test_images = test[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+        test_labels = np.array(test[b"labels"], dtype=np.int32)
+    else:
+        train = _unpickle(os.path.join(extract_dir, "train"))
+        test = _unpickle(os.path.join(extract_dir, "test"))
 
-    train_images, train_labels = _reshape(train)
-    test_images, test_labels = _reshape(test)
+        def _reshape(batch):
+            data = batch[b"data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+            labels = np.array(batch[b"fine_labels"], dtype=np.int32)
+            return data, labels
+
+        train_images, train_labels = _reshape(train)
+        test_images, test_labels = _reshape(test)
+
     return train_images, train_labels, test_images, test_labels
 
 
-class SplitCifar100Loader:
-    """
-    Load CIFAR-100 split into sequential tasks by class groups.
-
-    ``class_groups`` is a sequence of class-index tuples. The default is 20
-    sequential groups of 5 classes each: ((0..4), (5..9), ..., (95..99)).
-    """
+class SplitCifarLoader:
+    """Base class for Split-CIFAR loaders."""
 
     def __init__(
         self,
+        dataset_name: str,
         class_groups: Optional[Sequence[Sequence[int]]] = None,
-        classes_per_task: int = 5,
-        num_tasks: int = 20,
+        classes_per_task: int = 2,
+        num_tasks: int = 5,
         batch_size: int = 256,
         shuffle: bool = True,
         seed: Optional[int] = None,
         tensor_format: str = "flat",
         data_root: str = "./data",
-        num_classes: int = 100,
+        num_classes: int = 10,
     ):
         if class_groups is None:
             class_groups = tuple(
@@ -176,17 +208,23 @@ class SplitCifar100Loader:
         self.seed = seed
         self.tensor_format = tensor_format
         self.num_classes = num_classes
+        self.dataset_name = dataset_name
 
-        self._load_cifar100(data_root)
+        if dataset_name == "cifar10":
+            self.mean, self.std = CIFAR10_MEAN, CIFAR10_STD
+        else:
+            self.mean, self.std = CIFAR100_MEAN, CIFAR100_STD
+
+        self._load_dataset(data_root)
 
         self.tasks: List[TaskData] = []
         for task_id, classes in enumerate(self.class_groups):
             self.tasks.append(self._create_task(task_id, classes))
 
-    def _load_cifar100(self, data_root: str):
-        result = _load_cifar100_keras()
+    def _load_dataset(self, data_root: str):
+        result = _load_cifar_keras(self.dataset_name)
         if result is None:
-            result = _load_cifar100_manual(data_root)
+            result = _load_cifar_manual(self.dataset_name, data_root)
         train_images, train_labels, test_images, test_labels = result
 
         self._train_images = train_images.astype(np.float32) / 255.0
@@ -207,19 +245,23 @@ class SplitCifar100Loader:
 
         task_seed = self.seed + task_id if self.seed is not None else None
 
-        train_loader = SplitCifar100TaskLoader(
+        train_loader = SplitCifarTaskLoader(
             images=train_images,
             labels=train_labels,
             batch_size=self.batch_size,
+            mean=self.mean,
+            std=self.std,
             shuffle=self.shuffle,
             seed=task_seed,
             tensor_format=self.tensor_format,
             num_classes=self.num_classes,
         )
-        test_loader = SplitCifar100TaskLoader(
+        test_loader = SplitCifarTaskLoader(
             images=test_images,
             labels=test_labels,
             batch_size=self.batch_size,
+            mean=self.mean,
+            std=self.std,
             shuffle=False,
             seed=task_seed,
             tensor_format=self.tensor_format,
@@ -243,25 +285,43 @@ class SplitCifar100Loader:
         return self.tasks[idx]
 
 
-def build_split_cifar100_loaders(
-    config,
-    data_root: str = "./data",
-) -> List[TaskData]:
-    """
-    Build Split-CIFAR-100 task loaders from an ExperimentConfig.
+class SplitCifar10Loader(SplitCifarLoader):
+    def __init__(self, **kwargs):
+        if "num_classes" not in kwargs:
+            kwargs["num_classes"] = 10
+        super().__init__(dataset_name="cifar10", **kwargs)
 
-    Expects:
-        config.task_pairs           -> tuple of class-group tuples
-        config.num_output_classes   -> 100
-        config.training.batch_size
-        config.seed
-    """
-    loader = SplitCifar100Loader(
-        class_groups=config.task_pairs,
+
+class SplitCifar100Loader(SplitCifarLoader):
+    def __init__(self, **kwargs):
+        if "num_classes" not in kwargs:
+            kwargs["num_classes"] = 100
+        if "classes_per_task" not in kwargs and "class_groups" not in kwargs:
+            kwargs["classes_per_task"] = 5
+            kwargs["num_tasks"] = 20
+        super().__init__(dataset_name="cifar100", **kwargs)
+
+
+def build_split_cifar10_loaders(config, data_root: str = "./data") -> List[TaskData]:
+    loader = SplitCifar10Loader(
+        class_groups=getattr(config, "task_pairs", None),
         batch_size=config.training.batch_size,
         shuffle=True,
         seed=config.seed,
-        tensor_format="flat",
+        tensor_format=getattr(config.training, "tensor_format", "flat"),
+        data_root=data_root,
+        num_classes=getattr(config, "num_output_classes", 10),
+    )
+    return loader.tasks
+
+
+def build_split_cifar100_loaders(config, data_root: str = "./data") -> List[TaskData]:
+    loader = SplitCifar100Loader(
+        class_groups=getattr(config, "task_pairs", None),
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        seed=config.seed,
+        tensor_format=getattr(config.training, "tensor_format", "flat"),
         data_root=data_root,
         num_classes=getattr(config, "num_output_classes", 100),
     )
